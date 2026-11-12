@@ -8,7 +8,9 @@ import { utf8, concat, equal } from './bytes.js'
 
 export const LIMITS = {
   lease: 600e3, skew: 60e3, renew: 300e3, jitter: 0.2,
-  replicas: 5, searchNodes: 8, maxNodes: 8,
+  // placement: 4 XOR-closest *established* storage peers + 1 random one (anti-eclipse, spreads load);
+  // search asks 6 + 2, watch polls the 4 closest. Established = book score ≥ 75 (verified, up, known a while).
+  closest: 4, random: 1, searchClosest: 6, searchRandom: 2, watchClosest: 4, maxNodes: 8, established: 75,
   body: 1024, frame: 4096, age: 120e3, future: 60e3, hops: 4, fanout: 3,
   neighbours: 4, links: 16, rate: 10, dedup: 600e3
 }

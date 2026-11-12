@@ -56,19 +56,36 @@ export class Topics {
     return this.handles.get(h)
   }
 
-  // The n XOR-closest verified storage peers we can reach, skipping ones that recently failed.
-  nodes (id, n) {
+  // Storage peers we can reach over HTTP, skipping ones that recently failed.
+  candidates () {
     const now = Date.now()
     return this.peer.book.best(1000, 'native', e => e.verified && e.storage && this.peer.urlOf(e) && !(this.down.get(e.key) > now))
-      .sort((a, b) => compare(xor(unz32(a.key), id), xor(unz32(b.key), id))).slice(0, n)
+  }
+  // `closest` XOR-closest storage peers, established ones first (fresh keys can't grab a topic), plus
+  // `random` others picked at random. When too few are established, the closest of the rest fill in.
+  pick (id, closest, random = 0) {
+    const all = this.candidates(), score = e => this.peer.book.score(e)
+    const byXor = list => list.sort((a, b) => compare(xor(unz32(a.key), id), xor(unz32(b.key), id)))
+    const near = [...byXor(all.filter(e => score(e) >= this.L.established)), ...byXor(all.filter(e => score(e) < this.L.established))].slice(0, closest)
+    return [...near, ...shuffle(all.filter(e => !near.includes(e))).slice(0, random)]
+  }
+  nodes (id, n) { return this.pick(id, n, 0) }
+  // Records that reach this peer by any path (HTTP storage, a neighbour's cx_tpub) update local presence.
+  async local (raw) {
+    const rec = await readRecord(raw), t = rec && this.handles.get(hex(rec.t))
+    if (t) t.merge(rec)
   }
   markDown (key) { this.down.set(key, Date.now() + 5 * 60e3); this.peer.book.record(key, 'http', false) }
 
   // ---- presence: publish / renew / unpublish ----------------------------------------------------
   // Send records to the closest nodes, falling back to the next ones, until each has `replicas` copies.
   async push (items) {
-    const want = this.L.replicas, count = new Map(), tried = new Map(), ranked = new Map()
-    for (const x of items) { count.set(x, 0); tried.set(x, 0); ranked.set(x, this.nodes(x.topic.id, this.L.maxNodes)) }
+    const want = this.L.closest + this.L.random, count = new Map(), tried = new Map(), ranked = new Map()
+    for (const x of items) {
+      count.set(x, 0); tried.set(x, 0)
+      const first = this.pick(x.topic.id, this.L.closest, this.L.random)            // 4 established-closest + 1 random
+      ranked.set(x, [...first, ...this.pick(x.topic.id, this.L.maxNodes).filter(e => !first.includes(e))].slice(0, this.L.maxNodes))
+    }
     for (let round = 0; round < 4; round++) {
       const batches = new Map()
       for (const x of items) {
@@ -93,6 +110,11 @@ export class Topics {
         }
       }))
     }
+    // extra copies: our own store, and every connected neighbour of the topic (over WebRTC)
+    await Promise.allSettled(items.map(async x => {
+      await this.peer.store?.put(x.raw)
+      await Promise.allSettled(this.#linksFor(x.topic.hex).map(l => this.peer.chanRpc(l.channel, 'cx_tpub', { r: [x.raw] }, 5000)))
+    }))
     return count
   }
 
@@ -127,14 +149,18 @@ export class Topics {
   // ---- search and watch --------------------------------------------------------------------------
   async search (topic) {
     const found = []
-    await Promise.allSettled(this.nodes(topic.id, this.L.searchNodes).map(async e => {
+    for (const raw of this.peer.store?.find([topic.id]) || []) found.push(raw)
+    await Promise.allSettled([...this.#linksFor(topic.hex).map(async l => {        // neighbours answer over WebRTC
+      const r = await this.peer.chanRpc(l.channel, 'cx_tfind', { t: [topic.id] }, 5000)
+      found.push(...(Array.isArray(r.r) ? r.r : []))
+    }), ...this.pick(topic.id, this.L.searchClosest, this.L.searchRandom).map(async e => {
       const t0 = this.now()
       try {
         const r = await this.peer.rpc(this.peer.urlOf(e), 'cx_tfind', { t: [topic.id] }, { timeout: 6000, retries: 1 })
         this.sample(r.now, t0, this.now())
         found.push(...(Array.isArray(r.r) ? r.r : []))
       } catch { this.markDown(e.key) }
-    }))
+    })])
     for (const raw of found) { const rec = await readRecord(raw); if (rec && hex(rec.t) === topic.hex) topic.merge(rec) }
     const now = this.now() + this.skew()
     return [...topic.providers].filter(([, p]) => p.exp > now)
@@ -151,7 +177,7 @@ export class Topics {
     const plan = new Map()
     for (const t of this.handles.values()) {
       if (!t.subs.size) continue
-      for (const e of this.nodes(t.id, this.L.replicas)) {
+      for (const e of this.pick(t.id, this.L.watchClosest)) {
         if (!plan.has(e.key)) plan.set(e.key, { e, topics: new Set() })
         plan.get(e.key).topics.add(t.hex)
       }
@@ -221,7 +247,9 @@ export class Topics {
     const link = { address, tid, channel, kind }
     this.links.set(key, link)
     channel.binaryType = 'arraybuffer'
-    channel.onmessage = e => this.#onFrame(link, e.data).catch(() => {})
+    channel.onmessage = e => typeof e.data === 'string'
+      ? e.data[0] === 'K' && this.peer.onChanText(channel, e.data)        // KRPC over the link (topic storage queries)
+      : this.#onFrame(link, e.data).catch(() => {})
     channel.onclose = () => { if (this.links.get(key) === link) { this.links.delete(key); this.maintainSoon(t) } }
   }
   dropLinks (t) {

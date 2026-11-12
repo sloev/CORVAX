@@ -12,6 +12,7 @@ import * as rtc from './rtc.js'
 import * as relay from './relay.js'
 import baked from './anchors.js'
 import { Topics } from './topics.js'
+import { TopicStore } from './store.js'
 
 export class CorvaxError extends Error {
   constructor (code, message) { super(message || code); this.code = code }
@@ -50,6 +51,9 @@ export class Peer {
     p.abort = new AbortController()
     p.now = o.now || (() => Date.now())          // injectable clock (tests)
     p.topics = new Topics(p, o.topicLimits)
+    // Every peer may store topic records (one protocol for all peers). Natives share their node's store.
+    p.store = o.store !== undefined ? o.store : o.storage === false ? null : new TopicStore()
+    if (p.store && o.store === undefined) { p.sweeper = setInterval(() => p.store.sweep(), 30e3); p.sweeper.unref?.() }
     await p.bootstrap(o)
     for (const ib of p.inboxes) p.#poll(ib)
     return p
@@ -57,7 +61,7 @@ export class Peer {
 
   // ---- anchor book ---------------------------------------------------------------------------
   async bootstrap (o = {}) {
-    for (const t of [baked, await this.platform.loadCache?.() || '', ...(o.anchors || [])]) this.book.add(t)
+    for (const t of [...(o.anchors || []), baked, await this.platform.loadCache?.() || '']) this.book.add(t)   // explicit first: probed first
     if (this.self) { this.book.add(this.self.line); this.book.record(this.self.key, 'id', true) }
     const sources = [...(o.sources || [])]
     const home = typeof location !== 'undefined' && /^https?:/.test(import.meta.url) ? new URL('/', import.meta.url).href : null
@@ -67,7 +71,8 @@ export class Peer {
       ...(o.dohDomains || []).map(d => this.platform.dnsTxt(`_corvax-anchors.${d}`).then(t => this.book.add(t))),
       this.platform.discover?.().then(t => this.book.add(t || '', { lan: true }))
     ])
-    await this.verify(12)
+    // probe in rounds until we have an inbox (a stale cache must not starve bootstrap)
+    for (let i = 0; i < 6 && !this.#chooseInboxes().length && this.book.due(1).some(e => !e.lastProbe); i++) await this.verify(16)
     this.inboxes = this.#chooseInboxes()
     await this.refresh()
     this.refresher = setInterval(() => this.refresh().catch(() => {}), 10 * 60e3)
@@ -229,12 +234,57 @@ export class Peer {
     return relay.via(this, address, { timeout: timeout * 3, purpose, tp })
   }
 
+  // ---- KRPC over a DataChannel --------------------------------------------------------------------
+  // The same queries as over UDP and HTTP, as text frames "K" + base64url(bencode), on the `cx` control
+  // channel of any connection or on a topic link. So browsers and NATed peers can serve storage too.
+  // (Only topic-membership records are ever stored; broadcasts never are.)
+  async answer (q, a) {
+    if (q === 'cx_hi') {
+      if (!(a.n instanceof Uint8Array) || a.n.length > 64) throw [203, 'bad nonce']
+      return { k: this.id.pub, sig: await sign(this.id, concat(utf8('cx-hi'), a.n)), ...(this.store && { st: 1 }) }
+    }
+    if (q !== 'cx_tpub' && q !== 'cx_tfind') throw [204, 'method unknown']
+    if (!this.store) throw [204, 'storage disabled on this peer']
+    const list = (x, max, ok) => Array.isArray(x) ? x.filter(ok).slice(0, max) : []
+    if (q === 'cx_tfind') return { r: this.store.find(list(a.t, 16, b => b instanceof Uint8Array && b.length === 32)), now: Date.now() }
+    const ok = []
+    for (const raw of list(a.r, 32, r => r instanceof Uint8Array && r.length <= 512)) {
+      const s = await this.store.put(raw)
+      ok.push(utf8(s))
+      if (s === 'ok') this.topics.local(raw).catch(() => {})
+    }
+    return { ok, now: Date.now() }
+  }
+  chanRpc (ch, q, a = {}, timeout = 8000) {
+    const st = ch.cxRpc ||= new Map(), t = random(4)
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { st.delete(hex(t)); reject(new CorvaxError('timeout', `${q} over WebRTC timed out`)) }, timeout)
+      timer.unref?.()
+      st.set(hex(t), m => { clearTimeout(timer); m.r ? resolve(m.r) : reject(new CorvaxError('remote', `${q}: ${m.e?.[0]}`)) })
+      try { ch.send('K' + b64(encode({ t, y: 'q', q, a }))) } catch (e) { clearTimeout(timer); st.delete(hex(t)); reject(e) }
+    })
+  }
+  async onChanText (ch, text) {
+    let m
+    try { m = decode(unb64(text.slice(1))) } catch { return }
+    const y = m?.y instanceof Uint8Array ? str(m.y) : '', t = m?.t instanceof Uint8Array ? hex(m.t) : ''
+    if (y === 'r' || y === 'e') { const done = ch.cxRpc?.get(t); if (done) { ch.cxRpc.delete(t); done(m) } return }
+    if (y !== 'q' || !(m.q instanceof Uint8Array) || !t) return
+    let out
+    try { out = { t: m.t, y: 'r', r: await this.answer(str(m.q), m.a || {}) } } catch (e) {
+      const [code, msg] = Array.isArray(e) ? e : [201, e.message || 'error']
+      out = { t: m.t, y: 'e', e: [code, msg] }
+    }
+    try { ch.send('K' + b64(encode(out))) } catch {}
+  }
+
   // Topics: presence and best-effort broadcast (see PLAN.md §8–9)
   topic (name) { return this.topics.topic(name) }
 
   async close () {
     await this.topics.close()                // unpublishes (tombstones) before the network goes away
     clearInterval(this.refresher)
+    clearInterval(this.sweeper)
     this.abort.abort()
     clearTimeout(this.republish)
     for (const c of this.conns.values()) try { c.pc.close() } catch {}

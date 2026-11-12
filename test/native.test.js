@@ -28,5 +28,17 @@ for (const [name, load] of Object.entries(libs)) {
     channel.send('ping')
     await until(() => back.length === 1)
     assert.deepEqual(got, ['ping']); assert.deepEqual(back, ['pong:ping'])
+
+    // the same KRPC queries over the WebRTC control channel: B (not reachable over HTTP) serves storage
+    const { random, concat, utf8, equal } = await import('../src/bytes.js'), { verify } = await import('../src/crypto.js')
+    const { makeRecord, topicId } = await import('../src/topic.js')
+    const ctl = A.conns.get(B.address).ctl, n = random(16)
+    const hi = await A.chanRpc(ctl, 'cx_hi', { n })
+    assert.ok(equal(hi.k, B.id.pub) && await verify(hi.k, hi.sig, concat(utf8('cx-hi'), n)) && hi.st === 1)
+    const tid = await topicId('over-webrtc'), rec = await makeRecord(A.id, tid, 1, Date.now() + 600e3)
+    const put = await A.chanRpc(ctl, 'cx_tpub', { r: [rec] })
+    assert.equal(new TextDecoder().decode(put.ok[0]), 'ok')
+    assert.ok(equal((await A.chanRpc(ctl, 'cx_tfind', { t: [tid] })).r[0], rec))
+    await assert.rejects(A.chanRpc(ctl, 'nope', {}), e => e.code === 'remote')
   })
 }

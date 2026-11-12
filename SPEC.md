@@ -84,6 +84,7 @@ Every transport carries the same bencoded KRPC dictionaries: `{t, y:"q", q, a}`,
 |---|---|---|
 | UDP | one datagram = one message | node ↔ node, Mainline. A datagram whose first byte is `< 2` with the STUN magic cookie at bytes 4–7 is STUN |
 | HTTP `POST /krpc` | body = one query, response = one reply | `Content-Type: text/plain` (a CORS simple request); body ≤ 8 KB; `ro: 1` |
+| WebRTC DataChannel | text frame `"K" ‖ base64url(bencode)` on a connection's `cx` channel or a topic link | `cx_hi`, `cx_tpub`, `cx_tfind`; lets browsers and NATed peers serve storage |
 
 **HTTP semantics:**
 - `get`, `put` and `get_peers` are **recursive**: the anchor does the DHT work and answers with the result. `put` needs no token over HTTP.
@@ -238,11 +239,12 @@ record = bencode { t, k, seq, exp, sig },   sig = Ed25519("cx-topic" ‖ fields)
 
 ### 10.4 Peers
 - **Replicas:**
-  - a provider sends its record to the 5 verified storage peers (`st: 1`) in its anchor book with the smallest `ed_pub XOR topic id`, trying up to 8 when some fail
+  - a provider sends its record to 4 + 1 storage peers (`st: 1`): the 4 with the smallest `ed_pub XOR topic id` among *established* ones (anchor-book score ≥ 75; fresh keys fill in only when fewer exist), plus 1 random other (anti-eclipse); up to 8 are tried when some fail
+  - it also sends it to its connected neighbours for the topic over WebRTC (extra copies), and keeps it in its own store
   - it renews every 5 min ± 20 % jitter, batched per storage peer
   - `exp = now + skew + LEASE`, where `skew` = median of (storage `now` − local midpoint) over the last 8 replies; a `future`/`expired` status triggers one retry with the corrected skew
 - **Searching and watching:**
-  - searchers query the 8 closest storage peers and verify every record themselves
+  - searchers ask their own store, their topic neighbours (WebRTC), the 6 closest established storage peers and 2 random ones, and verify every record themselves
   - watchers run one `cx_twatch` per storage peer covering all their topics assigned to that node (its 5 closest)
 - **Neighbour links:**
   - a topic member keeps at most 4 links per topic and 16 in total, opened with `p: "topic"` to `recent` providers (direct, or relayed via `via?` when direct fails)
@@ -265,4 +267,5 @@ sig    = Ed25519("cx-tb" ‖ signed)          hop is not signed
   - a `p` that isn't a valid record for this `t` and `from`, or whose `exp < now − 60 s`
   - frames that exceed 10 per (`from`, `t`) per minute
 - **Otherwise** a receiver delivers the message, and if `hop > 1`, forwards it with `hop − 1` to at most 3 random other links for `t`, never to the incoming link or to `from`.
-- **Best-effort only:** no storage, history, acknowledgements, retries, ordering, late-join delivery or group encryption.
+- **Never stored** anywhere (not by storage peers, not by neighbours); only provider records are.
+- **Best-effort only:** no history, acknowledgements, retries, ordering, late-join delivery or group encryption.

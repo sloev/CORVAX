@@ -127,3 +127,13 @@ test('one peer protocol: a non-anchor native peer serves storage the same way; l
   await B.send(A.address, 'still here')
   await until(() => got.includes('still here'), 10000)
 })
+
+test('a stale anchor cache does not starve bootstrap', async t => {
+  const a = await node({ anchor: 'force' })
+  t.after(() => a.close())
+  const { z32: enc } = await import('../src/bytes.js')
+  const dead = Array.from({ length: 40 }, (_, i) => `corvax-anchor:${enc(random(32))}@127.0.0.1:${1000 + i}`).join('\n')
+  const p = await Peer.create({ anchors: [a.line()], allowPrivate: true, RTCPeerConnection: null, platform: { loadCache: () => dead } })
+  t.after(() => p.close())
+  assert.equal(p.inboxes[0]?.entry.key, a.key)
+})

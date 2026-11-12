@@ -88,7 +88,7 @@ export function installHandlers (node) {
   h.cx_tpub = async a => {
     const st = storage(), recs = Array.isArray(a.r) ? a.r.filter(r => r instanceof Uint8Array && r.length <= 512).slice(0, 32) : []
     const ok = []
-    for (const r of recs) ok.push(utf8(await st.put(r)))
+    for (const r of recs) { const s = await st.put(r); ok.push(utf8(s)); if (s === 'ok') node.peer?.topics.local(r).catch(() => {}) }
     return { ok, now: Date.now() }
   }
   h.cx_tfind = async a => ({ r: storage().find(ids(a.t, 16)), now: Date.now() })

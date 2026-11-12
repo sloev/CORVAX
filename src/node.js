@@ -87,7 +87,7 @@ export class CorvaxNode {
 
     this.peer = await Peer.create({
       seed: this.id.seed, book: this.book, allowPrivate: o.allowPrivate, relayFor: o.relayFor,
-      RTCPeerConnection: o.RTCPeerConnection, relayLimits: o.relayLimits,
+      RTCPeerConnection: o.RTCPeerConnection, relayLimits: o.relayLimits, store: this.store,
       sources: o.sources, dohDomains: o.dohDomains,
       self: this.isAnchor ? { key: this.key, line: this.line(), url: `http://127.0.0.1:${this.port}` } : null,
       platform: {

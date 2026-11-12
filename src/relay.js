@@ -63,6 +63,7 @@ export async function onSignal (peer, from, body) {
 
 // ---- C (and endpoints): control channel traffic -------------------------------------------------
 export function onControl (peer, conn, data) {
+  if (typeof data === 'string' && data[0] === 'K') return peer.onChanText(conn.ctl, data)   // KRPC over WebRTC
   if (typeof data === 'string') {
     let m
     try { m = JSON.parse(data) } catch { return }

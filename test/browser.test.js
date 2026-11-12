@@ -13,7 +13,7 @@ for (const name of browsers) {
   test(`browser (${name}): direct, through a third browser, and Node ↔ browser`, { skip: !playwright && 'playwright not installed' }, async t => {
     const a = await node({ anchor: 'force' })
     const browser = await playwright[name].launch()
-    t.after(async () => { await browser.close(); await a.close() })
+    t.after(async () => { await browser.close(); await a.close().catch(() => {}) })
     const origin = `http://127.0.0.1:${a.port}`
 
     // each page gets its own context (own storage, own identity)
@@ -80,5 +80,11 @@ for (const name of browsers) {
     await nt.broadcast({ move: 'e4' })
     const heard = await until(() => C.page.evaluate(() => window.heard.length && window.heard), 10000, 200)
     assert.deepEqual(heard.map(m => [m.from, m.body.move]), [[N.address, 'e4']])
+
+    // 5. neighbours hold extra copies over WebRTC: with every anchor gone, the members still find each other
+    assert.ok(await C.page.evaluate(n => window.me.store.find([[...window.me.topics.handles.values()][0].id]).length >= 1, N.address), 'the browser stores the Node peer\'s record')
+    await a.close()
+    const still = await nt.search()
+    assert.ok(still.some(f => f.address === C.address), 'search answered by the neighbour with no anchor up')
   })
 }

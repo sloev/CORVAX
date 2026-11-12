@@ -19,14 +19,16 @@ const live = async (name, address) => {
 test.before(async () => { nodes = await anchors(6); lines = nodes.map(n => n.line()) })
 test.after(async () => { for (const p of peers) await p.close(); for (const n of nodes) await n.close().catch(() => {}) })
 
-test('publish replicates to exactly the 5 XOR-closest storage peers; search finds the provider', async () => {
+test('publish: 4 XOR-closest + 1 random storage peer (none established yet); search finds the provider', async () => {
   const a = await peer(), b = await peer()
   const t = await a.topic('Chess')
   const { stored } = await t.publish()
   assert.equal(stored, 5)
   const id = await topicId('chess')
-  const closest = [...nodes].sort((x, y) => compare(xor(unz32(x.key), id), xor(unz32(y.key), id))).slice(0, 5).map(n => n.key).sort()
-  assert.deepEqual((await holders('chess')).map(n => n.key).sort(), closest)
+  const closest = [...nodes].sort((x, y) => compare(xor(unz32(x.key), id), xor(unz32(y.key), id))).slice(0, 4).map(n => n.key)
+  const held = (await holders('chess')).map(n => n.key)
+  assert.equal(held.length, 5)
+  assert.ok(closest.every(k => held.includes(k)), 'the 4 closest hold it, plus one random other')
   const found = await (await b.topic('  CHESS ')).search()
   assert.deepEqual(found.map(f => [f.address, f.presence]), [[a.address, 'recent']])
   assert.ok(found[0].expires > Date.now())
@@ -87,7 +89,7 @@ test('one long poll per storage peer for many topics; lost cursor → snapshot r
   for (const name of ['t1', 't2', 't3', 't4']) (await w.topic(name)).subscribe({ presence: e => seen.push([name, e.presence]) })
   await until(() => w.topics.polls.size > 0, 5000)
   const plan = new Set()
-  for (const name of ['t1', 't2', 't3', 't4']) for (const e of w.topics.nodes(await topicId(name), 5)) plan.add(e.key)
+  for (const name of ['t1', 't2', 't3', 't4']) for (const e of w.topics.nodes(await topicId(name), 4)) plan.add(e.key)
   await until(() => w.topics.polls.size === plan.size, 5000)
   for (const [key, p] of w.topics.polls) assert.ok(plan.has(key) && p.topics.size >= 1)
   const mine = new Set(await Promise.all(['t1', 't2', 't3', 't4'].map(async n => hex(await topicId(n)))))
@@ -103,4 +105,33 @@ test('one long poll per storage peer for many topics; lost cursor → snapshot r
   await w.close()
   assert.equal(w.topics.polls.size, 0); assert.equal(w.topics.links.size, 0)
   assert.equal(w.topics.renewTimer ?? null, null); assert.equal(w.topics.expiry, null)
+})
+
+test('placement prefers established storage peers; a fresh key closer to the topic cannot take a closest slot', async () => {
+  const { z32: enc } = await import('../src/bytes.js')
+  const p = await Peer.create({ anchors: [], allowPrivate: true, RTCPeerConnection: null })
+  peers.push(p)
+  const id = await topicId('eclipse')
+  const near = k => { const b = new Uint8Array(id); b[31] ^= k; return enc(b) }       // keys XOR-close to the topic id
+  const far = () => enc(crypto.getRandomValues(new Uint8Array(32)))
+  const add = (key, ageDays) => {
+    p.addAnchors(`corvax-anchor:${key}@10.0.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250)}:4799`)
+    p.book.record(key, 'id', true); p.book.record(key, 'http', true); p.book.get(key).storage = true
+    p.book.get(key).first = Date.now() - ageDays * 86400e3
+  }
+  const established = Array.from({ length: 6 }, far), sybils = [near(1), near(2), near(3)]
+  for (const k of established) add(k, 10)
+  for (const k of sybils) add(k, 0)                                                   // brand new, but closest of all
+  const placed = p.topics.pick(id, 4, 1).map(e => e.key)
+  assert.equal(placed.length, 5)
+  assert.ok(placed.slice(0, 4).every(k => established.includes(k)), 'closest slots go to established peers')
+  assert.ok(!placed.slice(0, 4).some(k => sybils.includes(k)))
+  const randoms = new Set()
+  for (let i = 0; i < 40; i++) randoms.add(p.topics.pick(id, 4, 1)[4].key)
+  assert.ok(randoms.size > 1, 'the fifth copy goes to a random other peer')
+  // a young network: fewer than 4 established → the closest of the rest fill in
+  const q = await Peer.create({ anchors: [], allowPrivate: true, RTCPeerConnection: null })
+  peers.push(q)
+  for (const k of sybils) { q.addAnchors(`corvax-anchor:${k}@10.1.1.1:4799`); q.book.record(k, 'id', true); q.book.record(k, 'http', true); q.book.get(k).storage = true }
+  assert.equal(q.topics.pick(id, 4, 1).length, 3)
 })
