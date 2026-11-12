@@ -1,0 +1,12 @@
+{
+  "name": "rendezvous",
+  "version": "0.1.0",
+  "description": "Universal peer discovery and signalling: one address, one signed record, the BitTorrent DHT, zero dependencies.",
+  "type": "module",
+  "exports": { ".": "./src/index.js", "./anchor": "./src/anchor.js" },
+  "bin": { "rv": "bin/rv.js" },
+  "files": ["src", "bin"],
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/" },
+  "license": "MIT"
+}

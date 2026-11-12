@@ -1,5 +1,5 @@
 # rendezvous
 
-Universal signalling and peer discovery: one address that lasts for years, one signed record, carried over any transport (Cloudflare Worker, Nostr, WebTorrent trackers, Mainline DHT, DNS, mDNS, UDP broadcast, BLE, QR, audio, ICMP...). The web is the first target.
+Find anyone by key, then connect directly. One address that never expires. The protocol is the BitTorrent Mainline DHT (BEP 5/44). Records use the pkarr format. Browsers get zero-SDP WebRTC. No conversations are relayed, and there are no dependencies.
 
-See [PLAN.md](PLAN.md).
+**Status:** work in progress. The plan is in [PLAN.md](PLAN.md). The code in `src/` is a first draft and **has not been tested yet**.

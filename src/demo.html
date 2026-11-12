@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rendezvous</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; color: #222; background: #fff }
+  @media (prefers-color-scheme: dark) { body { color: #ddd; background: #111 } input, button { color: inherit; background: #222; border-color: #444 } }
+  code { word-break: break-all; font-size: 13px }
+  input { width: 100%; box-sizing: border-box; padding: .5rem; font: inherit; border: 1px solid #ccc; border-radius: 6px }
+  button { padding: .5rem 1rem; font: inherit; border: 1px solid #ccc; border-radius: 6px; cursor: pointer }
+  #log { white-space: pre-wrap; font: 13px ui-monospace, monospace; margin-top: 1rem }
+  .row { display: flex; gap: .5rem; margin: .5rem 0 }
+</style>
+<h1>Rendezvous</h1>
+<p>Your address (share it):<br><code id="me">…</code></p>
+<div class="row"><input id="to" placeholder="Address to connect to"><button id="go">Connect</button></div>
+<div class="row"><input id="msg" placeholder="Message" disabled><button id="send" disabled>Send</button></div>
+<div id="log"></div>
+<script type="module">
+  import { Peer, connect, listen } from '/rv/index.js'
+  const $ = id => document.getElementById(id)
+  const log = s => { $('log').textContent += s + '\n' }
+  const ws = location.origin.replace(/^http/, 'ws')
+  const iceServers = [{ urls: `stun:${location.hostname}:${location.port || (location.protocol === 'https:' ? 443 : 80)}` }]
+  let seed = null
+  try { seed = localStorage.rvSeed } catch {}
+  const peer = await Peer.create({ seed, anchors: [ws] })
+  try { localStorage.rvSeed = peer.seed } catch {}
+  $('me').textContent = peer.address
+  await peer.publish({ n: 'demo' })
+  log('published to the DHT via ' + ws)
+
+  let channel
+  const use = (ch, who) => {
+    channel = ch
+    ch.onmessage = e => log(`${who.slice(0, 8)}: ${e.data}`)
+    $('msg').disabled = $('send').disabled = false
+    log('direct WebRTC connection with ' + who)
+  }
+  listen(peer, { iceServers, onchannel: ({ from, channel }) => use(channel, from) })
+  $('go').onclick = async () => {
+    const to = $('to').value.trim()
+    log('resolving ' + to + ' …')
+    try { use(await connect(peer, to, { iceServers }), to) } catch (e) { log('failed: ' + e.message) }
+  }
+  $('send').onclick = () => { channel.send($('msg').value); log('me: ' + $('msg').value); $('msg').value = '' }
+</script>
