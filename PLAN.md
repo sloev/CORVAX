@@ -25,6 +25,7 @@ Rendezvous does five things and then gets out of the way:
 - [ ] A Beacon from our code round-trips through the public pkarr relay (proves real Mainline compatibility)
 - [ ] Two browsers on different networks connect knowing only each other's address, both direct and forced through TURN
 - [ ] A fresh node with no configuration finds anchors via HTTP, DNS TXT, the Mainline DHT and the LAN
+- [ ] Every HTTP-reachable node serves the homepage (what it is, how to use it, known anchors)
 - [ ] README written. From then on: bug fixes only.
 
 ---
@@ -93,7 +94,26 @@ TURN      user = "<expiry>:<z32>", pass = base64(HMAC-SHA1(anchor_secret, user))
 | `rv_listen {k, ts, sig}` | ours | **long poll**: waits ≤ 25 s → `{msgs: [...]}`. `sig` = Ed25519(`"rv-listen:" ‖ ts`), ±5 min |
 | `rv_turn {k, ts, sig}` | ours | → `{user, pass, ttl, urls}` for this anchor's TURN |
 
-**Anchor HTTP endpoints:** `POST /krpc` · `GET /anchors.txt` · `GET /rv/*.js` (the library) · `GET /` (demo). CORS `*` on everything.
+**Anchor HTTP endpoints:** `GET /` (homepage, below) · `POST /krpc` · `GET /anchors.txt` · `GET /rv/*.js` (the library) · `GET /demo` (two-tab chat demo). CORS `*` on everything.
+
+### The homepage (`GET /`)
+Every node reachable over HTTP serves a thin page, so anyone who stumbles on an anchor's address learns what it is and how to join.
+- **Content, in this order:**
+  1. **What this is:** two sentences ("A Rendezvous anchor: it helps peers find each other by key and open direct WebRTC connections. It stores nothing but signed address records and short-lived encrypted messages.")
+  2. **This node:** its own anchor line, its uptime, and whether it is an anchor or a plain node
+  3. **How to use it:**
+     - browser: `import { Peer } from '<this origin>/rv/index.js'`
+     - native: `npx rendezvous node`
+     - list: `curl <this origin>/anchors.txt`
+     - plus links to `/demo` and the repo
+  4. **Known anchors:** the book's shared view (best 32 + 8 random), one anchor line per row with its score, inside a `<pre>`
+- **Rules:**
+  - server-rendered from one template string, **no JavaScript, no external requests** (no fonts, images or CDNs)
+  - ≤ 10 KB, with a system font
+  - dark and light mode via `prefers-color-scheme`
+  - readable on a phone
+  - all dynamic values HTML-escaped
+- **It doubles as an anchor list:** the anchor lines appear verbatim, so the page itself is a valid `sources` URL and a greppable channel (§6).
 
 ---
 
@@ -114,7 +134,7 @@ TURN      user = "<expiry>:<z32>", pass = base64(HMAC-SHA1(anchor_secret, user))
 |---|---|---|
 | Local cache (IndexedDB / `~/.config/rv/anchors.txt`) | ✅ | ✅ |
 | Baked-in `anchors.txt` (package / repo) | ✅ | ✅ |
-| Any text: invite link, paste, file, any URL (`sources: [...]`) | ✅ (HTTPS + CORS) | ✅ |
+| Any text: invite link, paste, file, any URL (`sources: [...]`), including any anchor's homepage | ✅ (HTTPS + CORS) | ✅ |
 | `GET /anchors.txt` / `rv_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
 | DNS TXT `_rv-anchors.<domain>` (`dohDomains: [...]`) | ✅ via public DoH JSON | ✅ via system resolver |
 | Mainline `get_peers` on the anchor infohash | ❌ | ✅ |
@@ -150,7 +170,7 @@ Errors:    'not-found' | 'no-answer' | 'ice-failed' | 'timeout' | 'no-webrtc'
 
 ---
 
-## 9. Files (~1,500 lines)
+## 9. Files (~1,550 lines)
 
 | File | Job | Lines | Draft? |
 |---|---|---|---|
@@ -163,11 +183,12 @@ Errors:    'not-found' | 'no-answer' | 'ice-failed' | 'timeout' | 'no-webrtc'
 | `src/peer.js` | `Peer`: identity, book, HTTP client, publish/resolve/send/listen | 170 | ✏️ |
 | `src/rtc.js` | `connect`/`accept` over any `RTCPeerConnection` | 90 | ✏️ |
 | `src/anchor.js` | UDP demux, HTTP server, inboxes, `rv_*` handlers, token bucket | 200 | ✏️ |
+| `src/home.js` | homepage template (escaped, no JS, ≤ 10 KB) | 50 | ⬜ |
 | `src/turn.js` | STUN binding + TURN server subset | 200 | ⬜ |
 | `src/lan.js` | broadcast/multicast + mDNS responder and query | 100 | ⬜ |
 | `src/node.js` | native wiring: UDP socket, book file, LAN, DNS lookup, promotion | 90 | ⬜ |
 | `bin/rv.js` | `rv node \| anchor \| anchors \| id \| resolve` | 50 | ✏️ |
-| `src/demo.html` · `anchors.txt` | two-tab chat demo · baked-in list | 60 | ✏️ |
+| `src/demo.html` · `anchors.txt` | two-tab chat demo (served at `/demo`) · baked-in list | 60 | ✏️ |
 
 ---
 
@@ -202,6 +223,7 @@ CLI: `rv node` (peer that promotes itself), `rv anchor` (forced anchor), `rv anc
 | `core` | encodings round-trip; truncated bencode can't hang; ed→x equals the derived X25519 key; Beacon and message tamper/replay rejected; anchor lines grepped from messy text; score maths |
 | `dht` | 20 loopback nodes: put/get, stale seq + bad signature rejected, announce_peer → get_peers |
 | `book` | 10 anchors, each knowing one neighbour, converge to all 10; a line with the wrong key is never verified; a dead anchor's score decays |
+| `home` | `GET /` returns HTML ≤ 10 KB with no `<script>` and no external URLs; contains this node's anchor line and the shared anchor lines; a book line containing `<script>` comes out escaped; grepping the page with `addAnchors()` recovers every listed anchor |
 | `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves and sends, A's long poll receives; `rv_check` promotes reachable nodes only; token bucket triggers |
 | `turn` | allocate → permission → data via the relay; bad credentials and quotas enforced |
 | `lan` | broadcast and mDNS discovery between two nodes on loopback/multicast |
@@ -217,7 +239,7 @@ CLI: `rv node` (peer that promotes itself), `rv anchor` (forced anchor), `rv anc
 3. `anchor.js` HTTP `/krpc` + long poll + inboxes, `peer.js` HTTP client → `anchor`
 4. `turn.js`, `rtc.js` → `turn`, `browser`
 5. `lan.js`, `node.js` (promotion, DNS, cache) → `lan`, promotion part of `anchor`
-6. CLI, demo, `anchors.txt`, `live` run, README. **Done.**
+6. `home.js`, CLI, demo, `anchors.txt`, `live` run, README. **Done.**
 
 ---
 
