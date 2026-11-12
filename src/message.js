@@ -6,7 +6,7 @@ import { identity, sign, verify, ephemeral, ecdh, hkdf, aesKey, encrypt, decrypt
 import { encode, decode } from './bencode.js'
 import { utf8, str, equal, hex } from './bytes.js'
 
-export const MAX_MESSAGE = 4096
+const MAX_MESSAGE = 4096
 export const MAX_AGE = 600e3
 
 const key = async (shared, ephX, toX) => aesKey(await hkdf(shared, concat(utf8('cx/msg'), ephX, toX)))

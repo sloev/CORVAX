@@ -23,7 +23,7 @@ export async function start (o = {}) {
   return node
 }
 
-export class CorvaxNode {
+class CorvaxNode {
   constructor (o) {
     this.o = {
       port: 4799, host: '0.0.0.0', anchor: 'auto', storage: true, lan: true, lanPort: 4798, mdns: true, mainline: false,

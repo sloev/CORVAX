@@ -1,5 +1,5 @@
 // The page every HTTP-reachable node serves at GET / to browsers: a tiny shell.
-//   <script src="/cx/app.js">  renders the human page, the inlined logo, and the live demo/query tool
+//   <script src="/cx/app.js">  renders the app: DOX / APP / STATS
 //   <pre id="anchors">          the anchor lines, verbatim (works without JavaScript and for grep)
 // Anchor stats, shared by every anchor implementation; recomputed at most every 30 s.
 const cache = new WeakMap()

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { z32, unz32, random, equal, utf8, str } from '../src/bytes.js'
+import { z32, unz32, random, equal, utf8 } from '../src/bytes.js'
 import { encode, decode } from '../src/bencode.js'
 import { identity, sign, verify } from '../src/crypto.js'
 import { seal, open } from '../src/message.js'

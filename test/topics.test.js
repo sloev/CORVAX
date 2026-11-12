@@ -3,7 +3,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { anchors, until } from './helpers.js'
 import { Peer } from '../src/peer.js'
-import { topicId, readRecord } from '../src/topic.js'
+import { topicId } from '../src/topic.js'
 import { hex, xor, compare, unz32 } from '../src/bytes.js'
 
 const fast = { lease: 3000, renew: 1500, jitter: 0.2 }
