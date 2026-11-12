@@ -11,6 +11,11 @@ const $ = (tag, attrs = {}, ...kids) => {
   return el
 }
 const since = s => s < 3600 ? `${Math.floor(s / 60)} min` : s < 86400 ? `${Math.floor(s / 3600)} h` : `${Math.floor(s / 86400)} days`
+const n = (v, one, many = one + 's') => `${v} ${v === 1 ? one : many}`
+const statsLine = s => [
+  n(s.peers ?? 0, 'peer') + ' listening', n(s.relays ?? 0, 'relay session'), `${n(s.topics ?? 0, 'topic')} (${n(s.records ?? 0, 'live record')})`,
+  n(s.messages ?? 0, 'queued message'), ...(s.dht !== undefined ? [n(s.dht, 'DHT node')] : []), ...(s.beacons !== undefined ? [n(s.beacons, 'Beacon')] : [])
+].join(' · ') + ' (updated every 30 s)'
 const short = a => `${a.slice(0, 8)}…${a.slice(-4)}`
 const node = document.body.dataset
 
@@ -59,6 +64,7 @@ const intro = $('div', {},
   $('h2', {}, 'This node'),
   $('pre', {}, node.line),
   $('p', { class: 'mute' }, `Services: ${(node.services || 'none').split(',').join(', ')} · up ${since(+node.uptime || 0)}`),
+  $('p', { class: 'mute' }, statsLine(JSON.parse(node.stats || '{}'))),
   $('h2', {}, 'How to use it'),
   $('pre', {}, `import { Peer } from '${node.origin}/cx/index.js'\nconst me = await Peer.create()\nconst { channel } = await me.connect('<address>')`),
   $('p', {}, 'Run a node (it becomes an anchor if it is reachable): ', $('code', {}, 'npx corvax node')),

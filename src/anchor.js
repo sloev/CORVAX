@@ -8,7 +8,7 @@ import { encode, decode } from './bencode.js'
 import { verify, random, hiOk } from './crypto.js'
 import { verifyBeacon } from './record.js'
 import { hex, utf8, str, z32 } from './bytes.js'
-import { homepage } from './home.js'
+import { homepage, stats } from './home.js'
 import { Inboxes } from './inbox.js'
 export { Inboxes }
 import { serve } from './store.js'
@@ -157,13 +157,14 @@ export function httpServer (node) {
       if (req.method !== 'GET') { res.statusCode = 405; return res.end() }
       if (path === '/') {
         res.setHeader('vary', 'accept')
+        res.setHeader('cache-control', 'public, max-age=30')
         if (!/text\/html/.test(req.headers.accept || '')) {             // curl, wget, scripts, fetch(): plain anchor lines
           res.setHeader('content-type', 'text/plain; charset=utf-8')
           return res.end(node.listing() + '\n')
         }
         res.setHeader('content-type', 'text/html; charset=utf-8')
         const origin = node.web || `http://${String(req.headers.host || `${node.host}:${node.port}`).replace(/[^\w.:[\]-]/g, '')}`
-        return res.end(homepage({ origin, line: node.line() || `(not an anchor) ${node.key}`, anchor: !!node.line(), services: node.services(), uptime: Date.now() - node.started, anchors: node.listing() }))
+        return res.end(homepage({ origin, line: node.line() || `(not an anchor) ${node.key}`, anchor: !!node.line(), services: node.services(), uptime: Date.now() - node.started, anchors: node.listing(), stats: stats(node, { inboxes: node.inboxes, store: node.store, bridges: node.peer?.bridges, extra: { dht: node.dht.nodes.size } }) }))
       }
       if (path === '/favicon.ico') return send(res, new URL('favicon.ico', logoDir), 'image/x-icon', true)
       if (/^\/cx\/[a-z]+\.js$/.test(path)) return send(res, new URL(path.slice(4), srcDir), 'text/javascript; charset=utf-8')

@@ -26,6 +26,7 @@ test(`homepage app (${name}): renders, goes live, topics and messages between tw
   assert.match(logo, /^data:image\/png;base64,/)
   assert.ok((await A.page.locator('#anchors').textContent()).includes(a.line()))
   assert.ok(await A.page.getByText('How to use it').isVisible())
+  assert.ok(await A.page.getByText(/peers? listening · .* relay sessions? · .* topics? \(/).isVisible(), 'stats line')
 
   // go live in both tabs
   const live = async p => {

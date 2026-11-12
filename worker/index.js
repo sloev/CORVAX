@@ -7,7 +7,7 @@ import { encode, decode } from '../src/bencode.js'
 import { TopicStore, serve } from '../src/store.js'
 import { Inboxes } from '../src/inbox.js'
 import { Book, formatLine } from '../src/book.js'
-import { homepage } from '../src/home.js'
+import { homepage, stats } from '../src/home.js'
 import { pack, unpack, verifyBeacon } from '../src/record.js'
 import { serveSocket } from '../src/relay.js'
 import { hex, unhex, utf8, str, z32, unz32, equal } from '../src/bytes.js'
@@ -55,9 +55,9 @@ export class Anchor extends DurableObject {
     if (req.method === 'POST' && url.pathname === '/krpc') return this.krpc(req, origin, ip)
     if (url.pathname === '/relay' && req.headers.get('upgrade') === 'websocket') return this.relay(ip)
     if (req.method !== 'GET' || url.pathname !== '/') return new Response(null, { status: 404, headers: CORS })
-    const headers = { ...CORS, vary: 'accept' }
+    const headers = { ...CORS, vary: 'accept', 'cache-control': 'public, max-age=30' }
     if (!/text\/html/.test(req.headers.get('accept') || '')) return new Response(this.listing(origin) + '\n', { headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' } })
-    const html = homepage({ origin, line: this.line(origin), anchor: true, services: ['https', 'storage'], uptime: Date.now() - this.started, anchors: this.listing(origin) })
+    const html = homepage({ origin, line: this.line(origin), anchor: true, services: ['https', 'storage'], uptime: Date.now() - this.started, anchors: this.listing(origin), stats: stats(this, { inboxes: this.inboxes, store: this.store, bridges: this.relayHost.bridges, extra: { beacons: this.beacons.size } }) })
     return new Response(html, { headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } })
   }
 
