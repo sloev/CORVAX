@@ -8,7 +8,7 @@ const err = (code, message) => Object.assign(new Error(message || code), { code 
 
 function withTimeout (promise, ms, code) {
   let timer
-  return Promise.race([promise, new Promise((resolve, reject) => { timer = setTimeout(() => reject(err(code)), ms) })])
+  return Promise.race([promise, new Promise((resolve, reject) => { timer = setTimeout(() => reject(err(code)), ms); timer.unref?.() })])
     .finally(() => clearTimeout(timer))
 }
 const opened = ch => new Promise(resolve => {
@@ -46,17 +46,17 @@ function register (peer, address, s) {
   return conn
 }
 
-export async function direct (peer, address, { timeout = 10000, purpose = 'app' } = {}) {
+export async function direct (peer, address, { timeout = 10000, purpose = 'app', tp } = {}) {
   if (!peer.RTC) throw err('no-webrtc', 'no RTCPeerConnection available (pass one to Peer.create)')
   const beacon = await peer.resolve(address)
   if (!beacon) throw err('not-found', `no record for ${address}`)
   if (peer.blockDirect.has(address)) throw err('ice-failed', 'direct path blocked (test hook)')
   const sid = b64(random(9))
   const s = session(peer, address, sid, beacon)
-  const answered = new Promise(resolve => { s.answered = resolve })
+  const answered = new Promise((resolve, reject) => { s.answered = resolve; s.busy = () => reject(err('busy', 'peer declined')) })
   try {
     await s.pc.setLocalDescription(await s.pc.createOffer())
-    await peer.signal(address, { cx: 'offer', sid, sdp: s.pc.localDescription.sdp, p: purpose }, beacon)
+    await peer.signal(address, { cx: 'offer', sid, sdp: s.pc.localDescription.sdp, p: purpose, ...(tp && { tp }) }, beacon)
     const sdp = await withTimeout(answered, timeout, 'no-answer')
     await s.pc.setRemoteDescription({ type: 'answer', sdp })
     flush(s)
@@ -79,11 +79,15 @@ export async function onSignal (peer, from, body) {
     return flush(s)
   }
   if (body.cx === 'answer') return peer.sessions.get(sid)?.answered?.(String(body.sdp))
+  if (body.cx === 'busy') return peer.sessions.get(sid)?.busy?.()
   if (body.cx !== 'offer' || !peer.RTC || peer.sessions.get(sid)?.pc) return
-  const purpose = body.p === 'relay' ? 'relay' : 'app'
+  const purpose = ['relay', 'topic'].includes(body.p) ? body.p : 'app'
+  const tp = purpose === 'topic' ? String(body.tp || '') : null
+  const busy = () => peer.signal(from, { cx: 'busy', sid }).catch(() => {})
   if (purpose === 'app' && !peer.acceptors.size) return                       // nobody is accepting
-  if (purpose === 'relay' && !peer.relayFor) return
+  if (purpose === 'relay' && !peer.relayFor) return busy()
   if (peer.blockDirect.has(from)) return
+  if (purpose === 'topic' && !peer.topics.accept(from, tp)) return busy()     // reserves a neighbour slot
   const s = session(peer, from, sid)
   try {
     await s.pc.setRemoteDescription({ type: 'offer', sdp: String(body.sdp) })
@@ -91,7 +95,8 @@ export async function onSignal (peer, from, body) {
     flush(s)
     await peer.signal(from, { cx: 'answer', sid, sdp: s.pc.localDescription.sdp })
     await withTimeout(s.open, 30000, 'ice-failed')
-  } catch { try { s.pc.close() } catch {} return } finally { peer.sessions.delete(sid) }
+  } catch { try { s.pc.close() } catch {} if (tp) peer.topics.release(from, tp); return } finally { peer.sessions.delete(sid) }
   const conn = register(peer, from, s)
+  if (purpose === 'topic') return peer.topics.attach(from, tp, conn.app, 'direct')
   if (purpose === 'app') for (const fn of peer.acceptors) fn({ from, channel: conn.app, pc: conn.pc, kind: 'direct' })
 }

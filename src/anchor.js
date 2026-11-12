@@ -10,7 +10,8 @@ import { hex, utf8, str, concat, equal, z32 } from './bytes.js'
 import { homepage } from './home.js'
 
 const INBOX_TTL = 120e3, INBOX_MAX = 64, POLL_MAX = 25e3, BODY_MAX = 8192
-const COST = { put: 6, cx_check: 12, cx_send: 1, cx_listen: 0.5, get: 1, get_peers: 1 }
+const COST = { put: 6, cx_check: 12, cx_tpub: 2, cx_send: 1, cx_tfind: 1, cx_listen: 0.5, cx_twatch: 0.5, get: 1, get_peers: 1 }
+const ids = (x, max) => Array.isArray(x) ? x.filter(b => b instanceof Uint8Array && b.length === 32).slice(0, max) : []
 const srcDir = new URL('./', import.meta.url), logoDir = new URL('../assets/logo/', import.meta.url)
 
 // ---- inboxes: short-lived queues of sealed messages, drained by long polls ---------------------
@@ -60,7 +61,7 @@ export function installHandlers (node) {
   const h = node.dht.handlers
   h.cx_hi = async a => {
     if (!(a.n instanceof Uint8Array) || a.n.length > 64) throw [203, 'bad nonce']
-    return { k: node.id.pub, sig: await sign(node.id, concat(utf8('cx-hi'), a.n)), ...(node.line() && { line: node.line() }) }
+    return { k: node.id.pub, sig: await sign(node.id, concat(utf8('cx-hi'), a.n)), ...(node.line() && { line: node.line() }), ...(node.storing() && { st: 1 }) }
   }
   h.cx_anchors = async (a, from) => {
     if (a.me instanceof Uint8Array && a.me.length <= 255) node.book.add(str(a.me))
@@ -81,6 +82,15 @@ export function installHandlers (node) {
     if (!node.book.best(1000, 'native', e => e.verified && e.host === from.host).length) throw [201, 'only for known anchors']
     return probe(node, str(a.ip), a.port, a.hport, a.k)
   }
+  // Topic storage (only while this node is a reachable storage node)
+  const storage = () => { if (!node.storing()) throw [204, 'not a storage node']; return node.store }
+  h.cx_tpub = async a => {
+    const st = storage(), recs = Array.isArray(a.r) ? a.r.filter(r => r instanceof Uint8Array && r.length <= 512).slice(0, 32) : []
+    const ok = []
+    for (const r of recs) ok.push(utf8(await st.put(r)))
+    return { ok, now: Date.now() }
+  }
+  h.cx_tfind = async a => ({ r: storage().find(ids(a.t, 16)), now: Date.now() })
   h.cx_send = async a => {
     if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > 4096) throw [203, 'bad message']
     await node.inboxes.put(a.to, a.msg)
@@ -161,6 +171,20 @@ export function httpServer (node) {
       if (!(a.info_hash instanceof Uint8Array) || a.info_hash.length !== 20) throw [203, 'bad info_hash']
       return { values: (await node.dht.getPeers(a.info_hash)).filter(p => !p.host.includes(':')).slice(0, 50)
         .map(p => Uint8Array.of(...p.host.split('.').map(Number), p.port >> 8, p.port & 255)) }
+    }
+    if (q === 'cx_twatch') {
+      if (!node.storing()) throw [204, 'not a storage node']
+      const t = ids(a.t, 64)
+      if (!t.length) throw [203, 'no topics']
+      const open = polls.get(from.host) || 0
+      if (open >= maxPolls) throw [202, 'too many polls']
+      polls.set(from.host, open + 1)
+      const ac = new AbortController()
+      res.on('close', () => ac.abort())
+      try {
+        const r = await node.store.watch(t, a.c instanceof Uint8Array ? str(a.c) : undefined, ac.signal)
+        return { c: r.c, r: r.r, now: Date.now(), ...(r.snap && { snap: 1 }) }
+      } finally { polls.set(from.host, polls.get(from.host) - 1) }
     }
     if (q === 'cx_listen') {
       if (!(a.k instanceof Uint8Array) || a.k.length !== 32 || typeof a.ts !== 'number' || Math.abs(Date.now() - a.ts) > 300e3) throw [203, 'bad listen']

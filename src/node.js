@@ -13,6 +13,7 @@ import { installHandlers, httpServer, Inboxes } from './anchor.js'
 import { startLan } from './lan.js'
 import { isStun, stunReply } from './stun.js'
 import { encode, decode } from './bencode.js'
+import { TopicStore } from './store.js'
 import { hex, unhex, utf8, str, z32, concat, equal, unz32 } from './bytes.js'
 
 const DIR = join(homedir(), '.config', 'corvax')
@@ -26,7 +27,7 @@ export async function start (o = {}) {
 export class CorvaxNode {
   constructor (o) {
     this.o = {
-      port: 4799, host: '0.0.0.0', anchor: 'auto', lan: true, lanPort: 4798, mdns: true, mainline: false,
+      port: 4799, host: '0.0.0.0', anchor: 'auto', storage: true, lan: true, lanPort: 4798, mdns: true, mainline: false,
       seedFile: join(DIR, 'seed'), cacheFile: join(DIR, 'anchors.txt'),
       intervals: { probe: 600e3, check: 1800e3 }, log: () => {}, ...o
     }
@@ -36,6 +37,7 @@ export class CorvaxNode {
     this.isAnchor = false
     this.publicHost = this.o.publicHost || null
     this.inboxes = new Inboxes()
+    this.store = this.o.storage ? new TopicStore(this.o.store) : null
     this.timers = []
   }
 
@@ -45,7 +47,8 @@ export class CorvaxNode {
     const own = this.line(), rest = this.book.shared().split('\n').filter(l => l && !l.startsWith(`corvax-anchor:${this.key}@`))
     return [own, ...rest].filter(Boolean).join('\n')
   }
-  services () { return this.isAnchor ? ['udp', 'http', ...(this.peer?.RTC && this.peer.relayFor ? ['relay'] : [])] : ['http (local)'] }
+  services () { return this.isAnchor ? ['udp', 'http', ...(this.storing() ? ['storage'] : []), ...(this.peer?.RTC && this.peer.relayFor ? ['relay'] : [])] : ['http (local)'] }
+  storing () { return !!(this.isAnchor && this.store) }
 
   async start () {
     const o = this.o, log = o.log
@@ -93,6 +96,7 @@ export class CorvaxNode {
         dnsTxt: name => import('node:dns/promises').then(d => d.resolveTxt(name)).then(r => r.map(x => x.join('')).join('\n'))
       }
     })
+    if (this.storing()) { const me = this.book.get(this.key); if (me) me.storage = true }
     if (this.peer.inboxes.length) await this.peer.publish().catch(e => log('publish', e.message))
     if (this.isAnchor) await this.#announce()
 
@@ -100,6 +104,7 @@ export class CorvaxNode {
     every(o.intervals.probe, () => this.maintain())
     every(o.intervals.check, () => o.anchor === 'auto' ? this.check() : Promise.resolve())
     every(60e3, async () => this.inboxes.sweep())
+    every(30e3, async () => this.store?.sweep())
     log(`corvax ${this.isAnchor ? 'anchor' : 'node'} ${this.key} on udp+tcp :${this.port}`)
     return this
   }
@@ -129,6 +134,7 @@ export class CorvaxNode {
         const ok = r.k instanceof Uint8Array && equal(r.k, unz32(e.key)) && await verify(r.k, r.sig, concat(utf8('cx-hi'), n))
         this.book.record(e.key, 'id', ok)
         if (!ok) return
+        this.book.get(e.key).storage = !!r.st
         this.book.record(e.key, 'udp', true, Date.now() - t0)
       } else this.book.record(e.key, 'udp', false)
       if (!this.book.get(e.key)) return
@@ -196,7 +202,8 @@ export class CorvaxNode {
   async close () {
     for (const t of this.timers) clearInterval(t)
     this.inboxes.close()
-    this.peer?.close()
+    this.store?.close()
+    await this.peer?.close()
     this.lan?.close()
     this.dht.close()
     try { this.udp.close() } catch {}

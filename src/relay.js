@@ -14,7 +14,7 @@ const bytesOf = d => d instanceof ArrayBuffer ? new Uint8Array(d) : ArrayBuffer.
 const waiters = new Map()      // sid -> { resolve, reject } for A waiting on B's answer
 
 // ---- A: ask B to meet through a third peer ---------------------------------------------------
-export async function via (peer, address, { timeout = 30000 } = {}) {
+export async function via (peer, address, { timeout = 30000, purpose = 'app', tp } = {}) {
   const beacon = await peer.resolve(address)
   if (!beacon) throw err('not-found')
   const sid = b64(random(9)), eph = await ephemeral()
@@ -23,8 +23,9 @@ export async function via (peer, address, { timeout = 30000 } = {}) {
   if (!list.length) throw err('no-relay', 'no peer to relay through')
   const answer = new Promise((resolve, reject) => waiters.set(sid, { resolve, reject }))
   const timer = setTimeout(() => waiters.get(sid)?.reject(err('no-relay', 'no answer')), timeout)
+  timer.unref?.()
   try {
-    await peer.signal(address, { cx: 'via?', sid, e: b64(eph.pub), via: list }, beacon)
+    await peer.signal(address, { cx: 'via?', sid, e: b64(eph.pub), via: list, p: purpose, ...(tp && { tp }) }, beacon)
     const r = await answer
     const conn = peer.conns.get(r.c) || await connTo(peer, r.c)
     const ch = await RelayChannel.create(peer, conn, sid, eph.priv, unb64(r.e), 'a')
@@ -41,18 +42,22 @@ export async function onSignal (peer, from, body) {
   const sid = String(body.sid || '')
   if (body.cx === 'via') return waiters.get(sid)?.resolve({ c: String(body.c), e: String(body.e) })
   if (body.cx === 'via-no') return waiters.get(sid)?.reject(err('no-relay', 'peer found no common relay'))
-  if (body.cx !== 'via?' || !peer.acceptors.size || !Array.isArray(body.via)) return
+  if (body.cx !== 'via?' || !Array.isArray(body.via)) return
+  const tp = body.p === 'topic' ? String(body.tp || '') : null
+  if (!tp && !peer.acceptors.size) return
+  if (tp && !peer.topics.accept(from, tp)) return peer.signal(from, { cx: 'via-no', sid }).catch(() => {})
   const list = body.via.map(String).filter(a => /^[a-z0-9]{52}$/.test(a) && a !== peer.address && a !== from).slice(0, 8)
   let c = list.find(a => peer.conns.has(a))
   for (const a of c ? [] : list) {
     try { await connTo(peer, a); c = a; break } catch {}
   }
-  if (!c) return peer.signal(from, { cx: 'via-no', sid }).catch(() => {})
+  if (!c) { if (tp) peer.topics.release(from, tp); return peer.signal(from, { cx: 'via-no', sid }).catch(() => {}) }
   const eph = await ephemeral(), conn = peer.conns.get(c)
   const ch = await RelayChannel.create(peer, conn, sid, eph.priv, unb64(String(body.e)), 'b')
   await peer.signal(from, { cx: 'via', sid, e: b64(eph.pub), c })
   conn.ctl.send(JSON.stringify({ cx: 'bridge', sid, to: from }))
-  try { await ch.ready(30000) } catch { return ch.close() }
+  try { await ch.ready(30000) } catch { if (tp) peer.topics.release(from, tp); return ch.close() }
+  if (tp) return peer.topics.attach(from, tp, ch, 'peer')
   for (const fn of peer.acceptors) fn({ from, channel: ch, kind: 'peer', via: c })
 }
 
@@ -136,7 +141,7 @@ export class RelayChannel {
   }
   ready (ms) {
     let timer
-    return Promise.race([this.whenOpen, new Promise((resolve, reject) => { timer = setTimeout(() => reject(err('no-relay', 'relay did not bridge')), ms) })])
+    return Promise.race([this.whenOpen, new Promise((resolve, reject) => { timer = setTimeout(() => reject(err('no-relay', 'relay did not bridge')), ms); timer.unref?.() })])
       .finally(() => clearTimeout(timer))
   }
 

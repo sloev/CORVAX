@@ -63,5 +63,22 @@ for (const name of browsers) {
     channel.send('from node')
     assert.equal(kind, 'direct')
     assert.equal(await reply, 'pong:from node')
+
+    // 4. topics: a browser provider is found by a Node peer, and receives its broadcast over the mesh
+    await C.page.evaluate(async () => {
+      window.heard = []
+      const t = await window.me.topic('chess')
+      t.subscribe({ message: m => window.heard.push(m) })
+      await t.publish()
+    })
+    const nt = await N.topic('Chess')
+    nt.subscribe({})
+    await nt.publish()
+    const found = await nt.search()
+    assert.ok(found.some(f => f.address === C.address && f.presence === 'recent'), 'Node finds the browser provider')
+    await until(() => [...N.topics.links.values()].some(l => l.address === C.address), 20000, 200)
+    await nt.broadcast({ move: 'e4' })
+    const heard = await until(() => C.page.evaluate(() => window.heard.length && window.heard), 10000, 200)
+    assert.deepEqual(heard.map(m => [m.from, m.body.move]), [[N.address, 'e4']])
   })
 }

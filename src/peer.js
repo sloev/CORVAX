@@ -11,6 +11,7 @@ import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, concat, equal } 
 import * as rtc from './rtc.js'
 import * as relay from './relay.js'
 import baked from './anchors.js'
+import { Topics } from './topics.js'
 
 export class CorvaxError extends Error {
   constructor (code, message) { super(message || code); this.code = code }
@@ -47,6 +48,8 @@ export class Peer {
     p.blockDirect = new Set()                // test hook: pretend direct ICE fails to these addresses
     p.inboxes = []
     p.abort = new AbortController()
+    p.now = o.now || (() => Date.now())          // injectable clock (tests)
+    p.topics = new Topics(p, o.topicLimits)
     await p.bootstrap(o)
     for (const ib of p.inboxes) p.#poll(ib)
     return p
@@ -66,7 +69,16 @@ export class Peer {
     ])
     await this.verify(12)
     this.inboxes = this.#chooseInboxes()
+    await this.refresh()
+    this.refresher = setInterval(() => this.refresh().catch(() => {}), 10 * 60e3)
+    this.refresher.unref?.()
+  }
+
+  // Pull anchor lists from our anchors and verify what is new, so every peer converges on the same
+  // set of anchors and storage nodes (topic records go to the closest ones in *our* book).
+  async refresh () {
     await Promise.allSettled(this.inboxes.map(ib => this.rpc(ib.url, 'cx_anchors', {}).then(r => this.book.add(str(r.a)))))
+    await this.verify(16)
     this.platform.saveCache?.(this.book.toText())
   }
 
@@ -82,7 +94,7 @@ export class Peer {
     try { r = await this.rpc(this.urlOf(e), 'cx_hi', { n }, { timeout: 5000, retries: 0 }) } catch { return this.book.record(e.key, 'http', false) }
     const ok = r.k instanceof Uint8Array && equal(r.k, unz32(e.key)) && await verify(r.k, r.sig, concat(utf8('cx-hi'), n))
     this.book.record(e.key, 'id', ok)
-    if (ok) this.book.record(e.key, 'http', true, Date.now() - t0)
+    if (ok) { this.book.get(e.key).storage = !!r.st; this.book.record(e.key, 'http', true, Date.now() - t0) }
     return ok
   }
   anchors () { return this.book.shared(isBrowser ? 'browser' : 'native') }
@@ -105,19 +117,19 @@ export class Peer {
   }
 
   // ---- KRPC over HTTP --------------------------------------------------------------------------
-  async rpc (url, q, a = {}, { timeout = 8000, retries = 2 } = {}) {
+  async rpc (url, q, a = {}, { timeout = 8000, retries = 2, signal: extra } = {}) {
     if (!url) throw new CorvaxError('no-anchor', 'no reachable anchor')
     const body = encode({ t: random(4), y: 'q', q, a, ro: 1 })       // same t on retries → executed once
     for (let i = 0; ; i++) {
       try {
-        const signal = AbortSignal.any([AbortSignal.timeout(timeout), this.abort.signal])
+        const signal = AbortSignal.any([AbortSignal.timeout(timeout), this.abort.signal, ...(extra ? [extra] : [])])
         const res = await fetch(url.replace(/\/$/, '') + '/krpc', { method: 'POST', headers: { 'content-type': 'text/plain' }, body, signal })
         const m = decode(new Uint8Array(await res.arrayBuffer()))
         if (m.y && str(m.y) === 'r') return m.r
         const [code, msg] = Array.isArray(m.e) ? m.e : [0, 'bad reply']
         throw Object.assign(new CorvaxError('remote', `${q}: ${code} ${str(msg instanceof Uint8Array ? msg : utf8(String(msg)))}`), { remote: true })
       } catch (e) {
-        if (e.remote || this.abort.signal.aborted || i >= retries) throw e
+        if (e.remote || this.abort.signal.aborted || extra?.aborted || i >= retries) throw e
         await sleep(300 * 2 ** i)
       }
     }
@@ -206,16 +218,22 @@ export class Peer {
   // ---- connections -------------------------------------------------------------------------------
   accept (fn) { this.acceptors.add(fn); return () => this.acceptors.delete(fn) }
 
-  async connect (address, { relay: mode = this.relay, timeout = 10000 } = {}) {
+  // purpose 'topic' (with tp = topic id hex) is used by topic neighbours; apps use the default.
+  async connect (address, { relay: mode = this.relay, timeout = 10000, purpose = 'app', tp } = {}) {
     try {
-      return await rtc.direct(this, address, { timeout })
+      return await rtc.direct(this, address, { timeout, purpose, tp })
     } catch (e) {
       if (mode !== 'fallback' || !['ice-failed', 'no-answer'].includes(e.code)) throw e
     }
-    return relay.via(this, address, { timeout: timeout * 3 })
+    return relay.via(this, address, { timeout: timeout * 3, purpose, tp })
   }
 
-  close () {
+  // Topics: presence and best-effort broadcast (see PLAN.md §8–9)
+  topic (name) { return this.topics.topic(name) }
+
+  async close () {
+    await this.topics.close()                // unpublishes (tombstones) before the network goes away
+    clearInterval(this.refresher)
     this.abort.abort()
     clearTimeout(this.republish)
     for (const c of this.conns.values()) try { c.pc.close() } catch {}

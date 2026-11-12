@@ -33,11 +33,25 @@ try {
   echo((await incoming2).channel)
   if (r.kind !== 'peer' || await roundtrip(r.channel) !== 'pong:ping') throw new Error('relay failed')
   step('relayed through a third peer')
+
+  A.blockDirect.clear(); B.blockDirect.clear()
+  const heard = []
+  const ta = await A.topic('smoke'), tb = await B.topic('smoke')
+  tb.subscribe({ message: m => heard.push(m.body) })
+  ta.subscribe({})
+  await tb.publish()
+  if ((await ta.publish()).stored < 1) throw new Error('topic not stored')
+  if (!(await ta.search()).some(f => f.address === B.address)) throw new Error('topic search failed')
+  step('topic publish + search')
+  await until(() => A.topics.links.size > 0 && B.topics.links.size > 0, 20000)
+  await ta.broadcast('hello topic')
+  await until(() => heard.length === 1)
+  step('topic broadcast')
   console.log(`runtime smoke test passed on ${runtime}`)
 } catch (e) {
   console.error(`FAILED on ${runtime}:`, e.message)
   process.exitCode = 1
 } finally {
-  A.close(); B.close(); await a1.close(); await a2.close()
+  await A.close(); await B.close(); await a1.close(); await a2.close()
   setTimeout(() => process.exit(), 100)
 }
