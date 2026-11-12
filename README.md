@@ -15,17 +15,17 @@ Browsers, no build step:
 
 ```html
 <script type="module">
-  import { Peer } from 'https://cdn.jsdelivr.net/npm/corvax@1/dist/corvax.min.js'
+  import { Peer } from 'https://cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js'
 </script>
 ```
 
 Node ≥ 22, Bun, Deno and bundlers:
 
 ```sh
-npm i corvax          # then: import { Peer } from 'corvax'   (Deno: 'npm:corvax')
+npm i @sloev/corvax   # then: import { Peer } from '@sloev/corvax'   (Deno: 'npm:@sloev/corvax')
 ```
 
-Every green push to `main` releases `1.0.N` (npm, plus a GitHub release with the bundle; the 10 newest are kept, `latest` tags the newest). `corvax@1` follows them; pin with `corvax@1.0.N`. The full JS reference is on every anchor's homepage under **DOX**.
+Every green push to `main` releases `0.1.N` (npm, plus a GitHub release with the bundle; the 10 newest are kept, `latest` tags the newest). `@sloev/corvax@0.1` follows them; pin with `@sloev/corvax@0.1.N`. The full JS reference is on every anchor's homepage under **DOX**.
 
 ```js
 const me = await Peer.create()                 // bootstraps from known anchors
@@ -46,9 +46,9 @@ Outside browsers, WebRTC comes from `werift` (an optional dependency); pass your
 ## Run a node
 
 ```sh
-npx corvax node                      # becomes an anchor when strangers can reach UDP+TCP 4799
-npx corvax anchor --public-host IP   # the first anchors of a network
-npx corvax anchors                   # print the anchor book
+npx @sloev/corvax node               # becomes an anchor when strangers can reach UDP+TCP 4799
+npx @sloev/corvax anchor --public-host IP   # the first anchors of a network
+npx @sloev/corvax anchors           # print the anchor book
 ```
 
 - **Browsers** opening a node's `/` get the CORVAX app: **DOX** (an overview and the JS API reference; shown first, then the last view is remembered), **APP** (identity, peers, messages, topics, follows, updates) and **STATS** (this anchor and your node).

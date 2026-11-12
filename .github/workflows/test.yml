@@ -40,7 +40,7 @@ jobs:
         run: deno run -A test/runtime-smoke.js
 
   # Every green push to main is a release: v<major.minor from package.json>.<run number>, published to npm
-  # (jsDelivr then serves corvax@1 to browsers), a GitHub release with the bundle and tarball, `latest` moved
+  # (jsDelivr then serves @sloev/corvax@0.1 to browsers), a GitHub release with the bundle and tarball, `latest` moved
   # to it, and only the 10 newest releases kept. npm: trusted publishing for this repo, or an NPM_TOKEN secret.
   release:
     needs: test
@@ -65,13 +65,13 @@ jobs:
         run: |
           git tag "v$V"; git tag -f latest
           git push origin "v$V"; git push -f origin latest
-          gh release create "v$V" dist/corvax.min.js "corvax-$V.tgz" --title "v$V" --latest \
-            --notes "npm i corvax@$V · import { Peer } from 'https://cdn.jsdelivr.net/npm/corvax@$V/dist/corvax.min.js'"
+          gh release create "v$V" dist/corvax.min.js "sloev-corvax-$V.tgz" --title "v$V" --latest \
+            --notes "npm i @sloev/corvax@$V · import { Peer } from 'https://cdn.jsdelivr.net/npm/@sloev/corvax@$V/dist/corvax.min.js'"
           gh release list --limit 100 --json tagName,createdAt -q 'sort_by(.createdAt) | reverse | .[10:][].tagName' |
             xargs -r -n1 gh release delete --yes --cleanup-tag
       - name: Publish to npm
         continue-on-error: true          # until npm is set up, releases still happen
         env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
         run: |
-          npm publish "corvax-$V.tgz" --provenance --access public
-          curl -fsS https://purge.jsdelivr.net/npm/corvax@1/dist/corvax.min.js || true
+          npm publish "sloev-corvax-$V.tgz" --provenance --access public
+          curl -fsS https://purge.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js || true

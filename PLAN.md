@@ -47,7 +47,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 - [x] **Bun 1.4 and Deno 2.9:** smoke test (anchors, messages, direct and relayed channels, topics)
 - [x] **Live:** our Beacon round-trips through `relay.pkarr.org`; DNS TXT via DoH
 - [x] **Homepage app:** DOX (overview + JS API reference) / APP / STATS; DOX first, then the last view remembered; CORVAX wordmark in the header. APP: identity, peers with honest presence, messages and live chat, topics, follows, live-only updates. Driven end to end in Chromium (`test/app.test.js`); no sideways scroll at 320–420 px
-- [x] **Releases:** every green push to `main` is `v1.0.<run>`: minified ESM bundle (~50 KB, 18 KB gzipped) published to npm as `corvax`, GitHub release with bundle and tarball, `latest` tag moved, 10 newest kept. One way to load it everywhere: `cdn.jsdelivr.net/npm/corvax@1/dist/corvax.min.js` in browsers, `npm i corvax` elsewhere
+- [x] **Releases:** every green push to `main` is `v0.1.<run>`: minified ESM bundle (~50 KB, 18 KB gzipped) published to npm as `@sloev/corvax`, GitHub release with bundle and tarball, `latest` tag moved, 10 newest kept. One way to load it everywhere: `cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js` in browsers, `npm i corvax` elsewhere
 - [x] **Live visitor count:** the homepage counts its open tabs with presence leases on topic `corvax-worker-home` (throwaway keys, no Beacon)
 - [x] **Public anchor** `https://corvax.sloev.workers.dev` (Cloudflare Worker, `worker/`): `test/worker-check.js` passes live; topic records persist in SQLite across evictions; zero-config peers bootstrap from it; its Beacons reach Mainline via the pkarr relay
 - [ ] Firefox and WebKit (CI, run by hand), real Safari

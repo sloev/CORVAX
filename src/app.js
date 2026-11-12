@@ -328,8 +328,8 @@ function chat (a) {
 }
 
 // ---- DOX --------------------------------------------------------------------------------------
-// The one way to load CORVAX in a browser, used in every doc: the newest 1.x release from npm, minified.
-const CDN = 'https://cdn.jsdelivr.net/npm/corvax@1/dist/corvax.min.js'
+// The one way to load CORVAX in a browser, used in every doc: the newest 0.1.x release from npm, minified.
+const CDN = 'https://cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js'
 // [signature, what it does, example]. The whole public JS API; SPEC.md has the wire protocol.
 const API = [
   ['Peer.create(options?) → Promise<Peer>', 'Creates an identity (or restores one from seed), finds anchors and starts listening for messages. Every option is optional.',
@@ -381,7 +381,7 @@ channel.send('hi')                      // open once connect() resolves`],
   ['Errors', 'Failures are CorvaxError with a code: no-anchor, not-found, timeout, no-answer, ice-failed, no-relay, busy, no-storage, not-published, too-large, rate-limited, no-webrtc, unsupported, closed.',
 `try { await me.connect(address) } catch (e) { if (e.code === 'not-found') console.log('not published') }`],
   ['Other exports', 'identity(seed?), z32/unz32 (address ⇄ key), normalize/topicId (topic names), parseLine/formatLine/Book (anchor lines), DHT (sans-IO Mainline KRPC).',
-`import { normalize, topicId } from 'corvax'   // or the browser URL above
+`import { normalize, topicId } from '@sloev/corvax'   // or the browser URL above
 normalize('  Chess ') // 'chess'`],
 ]
 function dox () {
@@ -395,7 +395,7 @@ function dox () {
     h('p', { class: 'small' }, 'Browsers (no build step):'),
     h('pre', {}, `<script type="module">\n  import { Peer } from '${CDN}'\n</script>`),
     h('p', { class: 'small' }, 'Node ≥ 22, Bun, Deno and bundlers:'),
-    h('pre', {}, `npm i corvax          # Deno: import { Peer } from 'npm:corvax'\n\nimport { Peer } from 'corvax'`),
+    h('pre', {}, `npm i @sloev/corvax   # Deno: import { Peer } from 'npm:@sloev/corvax'\n\nimport { Peer } from '@sloev/corvax'`),
     h('p', { class: 'small' }, 'Then:'),
     h('pre', {}, `const me = await Peer.create()
 await me.publish()
@@ -405,8 +405,8 @@ channel.send('hello')`),
     h('h3', {}, 'Reference'),
     API.map(([sig, what, ex]) => h('section', { class: 'ref' }, h('h4', {}, h('code', {}, sig)), h('p', { class: 'small' }, what), h('pre', {}, ex))),
     h('h3', {}, 'Run a node'),
-    h('pre', {}, `npx corvax node                      # an anchor when reachable on UDP+TCP 4799
-npx corvax anchor --public-host IP   # a first anchor of a network
+    h('pre', {}, `npx @sloev/corvax node               # an anchor when reachable on UDP+TCP 4799
+npx @sloev/corvax anchor --public-host IP   # a first anchor of a network
 curl -s ${node.origin}                # this anchor's list, as plain text`),
     h('p', { class: 'small' }, 'Wire protocol: ', h('a', { href: 'https://github.com/sloev/corvax/blob/main/SPEC.md' }, 'SPEC.md'), ' · ', h('a', { href: 'https://github.com/sloev/corvax' }, 'source')),
     h('h3', {}, 'This node'), h('pre', {}, node.line),
