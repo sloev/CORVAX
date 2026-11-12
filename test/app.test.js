@@ -61,5 +61,23 @@ test(`homepage app (${name}): renders, goes live, topics and messages between tw
   await msgCard(B.page).getByRole('button', { name: 'Send' }).click()
   await msgCard(A.page).locator('.log').getByText(/from .*: hello from B/).waitFor({ timeout: 10000 })
   void addrB
+
+  // client-side storage: a reload keeps the identity, the anchor book and the joined topics, and goes live again
+  const stored = await A.page.evaluate(() => Object.fromEntries(Object.keys(localStorage).filter(k => k.startsWith('corvax.')).map(k => [k, localStorage.getItem(k)])))
+  assert.match(stored['corvax.seed'], /^[0-9a-f]{64}$/)
+  assert.ok(stored['corvax.anchors'].includes(a.line().split(';')[0]), 'anchor book cached')
+  assert.deepEqual(JSON.parse(stored['corvax.app']), { live: true, topics: { chess: { sub: true, pub: true } } })
+  await A.page.reload()
+  await A.page.getByText('Your address:').waitFor({ timeout: 15000 })           // went live by itself
+  assert.equal(await A.page.locator('span', { hasText: 'Your address:' }).locator('code').textContent(), addrA, 'same identity')
+  await topicCard(A.page).locator('.log').getByText('restored "chess" (subscribed, published)').waitFor({ timeout: 10000 })
+  assert.equal(await topicCard(A.page).getByRole('button', { name: 'Unpublish' }).count(), 1)
+  const search = (await topicCard(B.page).getByRole('button', { name: 'Search' }).click(), topicCard(B.page).locator('.log'))
+  await search.getByText(addrA).last().waitFor({ timeout: 10000 })
+
+  // Forget: clears everything and returns to the start
+  await A.page.getByRole('button', { name: 'Forget' }).click()
+  await A.page.getByRole('button', { name: 'Go live' }).waitFor({ timeout: 10000 })
+  assert.equal(await A.page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('corvax.')).length), 0)
   assert.deepEqual([...A.errors, ...B.errors], [], 'no page errors')
 })

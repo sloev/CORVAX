@@ -135,11 +135,18 @@ Messages are accepted only if they decrypt, the signature verifies, `to` is the 
   - every value HTML-escaped
 - **`app.js` (≈ 13 KB, same-origin, no external requests):**
   - renders the human page: the logo **inlined** as a data URI (so there's no `/logo` endpoint), what the node is, this node, how to use it, and the known anchors
-  - a **"Go live"** button loads the library only on click, creates a peer in the tab (seed in `localStorage`, exposed as `window.corvax` for devtools) and turns the page into a demo and query tool:
+  - a **"Go live"** button loads the library only on click, creates a peer in the tab (exposed as `window.corvax` for devtools) and turns the page into a demo and query tool:
     - **Messages:** send and receive
     - **Connect:** a DataChannel chat, direct or relayed
     - **Topics:** search, publish/unpublish, subscribe (presence + broadcasts), broadcast
   - dark and light mode, readable on a phone
+  - **client-side storage (`localStorage`)** keeps the live node working across reloads:
+    - `corvax.seed`: the identity, so the address stays the same
+    - `corvax.anchors`: the anchor book, kept by the library, so the next start needs no bootstrap round
+    - `corvax.app`: `{ live, topics: { name: { sub, pub } } }`; a tab that was live goes live again on load and re-subscribes and re-publishes its topics
+    - **Forget** clears all `corvax.*` keys
+    - without storage (private mode, blocked) everything still works, just without memory
+- **Plain `curl`** gets no HTML at all; `curl -H 'Accept: text/html'` gets the thin shell.
 - **Everything else** (`curl`, `wget`, scripts, `fetch()`) gets `text/plain`: own line first, then the shared view, one anchor line per line. There's no `/anchors.txt`.
 
 ---

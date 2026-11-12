@@ -13,6 +13,17 @@ const $ = (tag, attrs = {}, ...kids) => {
 const since = s => s < 3600 ? `${Math.floor(s / 60)} min` : s < 86400 ? `${Math.floor(s / 3600)} h` : `${Math.floor(s / 86400)} days`
 const short = a => `${a.slice(0, 8)}…${a.slice(-4)}`
 const node = document.body.dataset
+
+// Client-side storage (localStorage): the key ("corvax.seed"), the anchor book ("corvax.anchors", kept by the
+// library) and the app state ("corvax.app": live or not, joined topics). Everything works without it, just
+// without memory across reloads.
+const store = {
+  get (k, fallback) { try { return JSON.parse(localStorage.getItem(k)) ?? fallback } catch { return fallback } },
+  set (k, v) { try { localStorage.setItem(k, JSON.stringify(v)) } catch {} },
+  clear () { try { for (const k of Object.keys(localStorage)) if (k.startsWith('corvax.')) localStorage.removeItem(k) } catch {} }
+}
+const app = store.get('corvax.app', { live: false, topics: {} })
+const saveApp = () => store.set('corvax.app', app)
 const anchors = document.getElementById('anchors')
 
 document.head.append($('style', {}, `
@@ -57,7 +68,7 @@ const intro = $('div', {},
 
 // ---- the live part ---------------------------------------------------------------------------
 const log = el => (...parts) => { el.append(parts.join(' ') + '\n'); el.scrollTop = el.scrollHeight }
-const status = $('span', { class: 'mute' }, 'Not connected. Going live creates a peer in this tab (its key is kept in this browser).')
+const status = $('span', { class: 'mute' }, 'Not connected. Going live creates a peer in this tab; its key, anchors and topics are kept in this browser.')
 const goLive = $('button', { class: 'primary', onclick: () => start() }, 'Go live')
 const live = $('div', {}, $('h2', {}, 'Live'), $('div', { class: 'row' }, goLive, status))
 const known = $('div', {}, $('h2', {}, 'Known anchors'))
@@ -71,14 +82,16 @@ async function start () {
   try {
     const { Peer } = await import('./index.js')
     let seed = null
-    try { seed = localStorage.getItem('corvax.seed') } catch {}
+    try { seed = localStorage.getItem('corvax.seed') } catch {}           // stored raw (hex), for compatibility
     const local = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1)/.test(location.hostname)
     me = await Peer.create({ seed, allowPrivate: local })
     try { localStorage.setItem('corvax.seed', me.seed) } catch {}
     window.corvax = me                                  // for poking at the live peer from devtools
     await me.publish()
+    app.live = true; saveApp()
     status.textContent = ''
-    status.append('Your address: ', $('code', {}, me.address))
+    status.append('Your address: ', $('code', {}, me.address), ' ',
+      $('button', { title: 'Forget this identity, its anchors and topics, and stop', onclick: () => { store.clear(); location.reload() } }, 'Forget'))
     goLive.remove()
     live.append(messages(), connections(), topics())
   } catch (e) {
@@ -122,32 +135,62 @@ function connections () {
 
 function topics () {
   const name = field('Topic, e.g. chess'), text = field('Broadcast (≤ 1 KB)'), out = $('pre', { class: 'log' })
+  const joined = $('p', { class: 'mute' })
   const say = log(out)
-  let t, stop
-  const topic = async () => (t = await me.topic(name.value))          // handles are cached per normalized name
+  const subs = new Map()                                          // normalized name -> unsubscribe fn
+  const topic = () => me.topic(name.value)                        // handles are cached per normalized name
   const run = fn => async () => { try { await fn() } catch (e) { say('failed:', e.code || e.message) } }
+  const remember = (t, change) => {
+    const cur = { sub: false, pub: false, ...app.topics[t.name], ...change }
+    if (cur.sub || cur.pub) app.topics[t.name] = cur; else delete app.topics[t.name]
+    saveApp(); render(t)
+  }
+  const render = t => {
+    const st = t ? app.topics[t.name] || {} : {}
+    sub.textContent = st.sub ? 'Unsubscribe' : 'Subscribe'
+    pub.textContent = st.pub ? 'Unpublish' : 'Publish'
+    const list = Object.entries(app.topics).map(([n, v]) => `${n} (${[v.sub && 'subscribed', v.pub && 'published'].filter(Boolean).join(', ')})`)
+    joined.textContent = list.length ? `Joined: ${list.join(' · ')}` : ''
+  }
+  const subscribe = t => subs.set(t.name, t.subscribe({
+    presence: e => say(`[${t.name}] presence ${short(e.address)}: ${e.presence}`),
+    message: m => say(`[${t.name}] broadcast from ${short(m.from)}:`, typeof m.body === 'string' ? m.body : JSON.stringify(m.body))
+  }))
   const search = run(async () => {
-    const found = await (await topic()).search()
+    const t = await topic(), found = await t.search()
     say(`"${t.name}": ${found.length} other provider(s)`)
     for (const f of found) say(`  ${f.address}  ${f.presence}, lease until ${new Date(f.expires).toLocaleTimeString()}`)
   })
   const pub = $('button', { onclick: run(async () => {
-    const tp = await topic()
-    if (tp.published) { await tp.unpublish(); pub.textContent = 'Publish'; return say(`unpublished "${tp.name}"`) }
-    const { stored } = await tp.publish(); pub.textContent = 'Unpublish'; say(`published "${tp.name}" on ${stored} storage node(s)`)
+    const t = await topic()
+    if (t.published) { await t.unpublish(); remember(t, { pub: false }); return say(`unpublished "${t.name}"`) }
+    const { stored } = await t.publish(); remember(t, { pub: true }); say(`published "${t.name}" on ${stored} storage node(s)`)
   }) }, 'Publish')
   const sub = $('button', { onclick: run(async () => {
-    if (stop) { stop(); stop = null; sub.textContent = 'Subscribe'; return say('unsubscribed') }
-    const tp = await topic()
-    stop = tp.subscribe({
-      presence: e => say(`presence ${short(e.address)}: ${e.presence}`),
-      message: m => say(`broadcast from ${short(m.from)}:`, typeof m.body === 'string' ? m.body : JSON.stringify(m.body))
-    })
-    sub.textContent = 'Unsubscribe'; say(`subscribed to "${tp.name}" (presence + broadcasts)`)
+    const t = await topic()
+    if (subs.has(t.name)) { subs.get(t.name)(); subs.delete(t.name); remember(t, { sub: false }); return say(`unsubscribed from "${t.name}"`) }
+    subscribe(t); remember(t, { sub: true }); say(`subscribed to "${t.name}" (presence + broadcasts)`)
   }) }, 'Subscribe')
-  const cast = run(async () => { const { sent } = await (await topic()).broadcast(text.value); say(`me (to ${sent} neighbour(s)):`, text.value); text.value = '' })
+  const cast = run(async () => { const t = await topic(), { sent } = await t.broadcast(text.value); say(`[${t.name}] me (to ${sent} neighbour(s)):`, text.value); text.value = '' })
+  name.addEventListener('input', () => topic().then(render, () => render()))
+
+  // restore what this browser had joined before the reload
+  run(async () => {
+    for (const [n, v] of Object.entries(app.topics)) {
+      const t = await me.topic(n)
+      if (v.sub) subscribe(t)
+      if (v.pub) await t.publish()
+      say(`restored "${n}" (${[v.sub && 'subscribed', v.pub && 'published'].filter(Boolean).join(', ')})`)
+      name.value ||= n
+    }
+    render(name.value ? await topic() : null)
+  })()
+
   return $('div', { class: 'card' }, $('h3', {}, 'Topics'),
     $('p', { class: 'mute' }, 'Presence is a 10-minute lease: "recent" means it was renewed lately, not that the peer is online. Broadcasts are best-effort: no history, no delivery guarantee. Publish before broadcasting.'),
     $('div', { class: 'row' }, name, $('button', { onclick: search }, 'Search'), pub, sub),
-    $('div', { class: 'row' }, text, $('button', { onclick: cast }, 'Broadcast')), out)
+    $('div', { class: 'row' }, text, $('button', { onclick: cast }, 'Broadcast')), joined, out)
 }
+
+// A browser that was live before goes live again on load, with the same identity.
+if (app.live) start()
