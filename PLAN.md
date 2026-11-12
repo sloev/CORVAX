@@ -50,14 +50,21 @@ The protocol ends when `connect()` returns an open DataChannel.
 ## 3. Protocol
 
 ### 3.1 KRPC queries
-Transports: **UDP** (native ↔ anchor ↔ Mainline) and **WebSocket** (browser ↔ anchor). Clients set `ro: 1` (BEP 43).
+KRPC is the same bencoded message on every transport. Clients set `ro: 1` (BEP 43).
+
+| Transport | Framing | Used by |
+|---|---|---|
+| **UDP** | one datagram = one message | native ↔ anchor ↔ Mainline |
+| **WebRTC DataChannel** (`webrtc-direct` to an anchor's `IP:port`) | one message = one message | browsers and natives, **no domain or TLS needed** |
+| **HTTP(S) `POST /krpc`** | body = one query, response = one reply. `rv_listen` turns into a long poll: the reply waits up to 25 s and carries the queued `rv_msg`s | browsers, `curl`, IoT, anything with HTTP |
+| **WebSocket** | one frame = one message | browsers (lower latency than long polling) |
 
 | Query | Source | Meaning |
 |---|---|---|
 | `ping`, `find_node` | BEP 5 | routing |
 | `get_peers`, `announce_peer` | BEP 5 | anchors announce on the infohash `SHA1("rendezvous anchors v1")`, so **the 10M-node Mainline DHT becomes an anchor directory** |
 | `get`, `put` | BEP 44 | resolve / publish a Beacon |
-| `rv_hi {n}` | ours | → `{k, sig = Ed25519(n), w?}`: proves the anchor's identity and gives its WebSocket URL |
+| `rv_hi {n}` | ours | → `{k, sig = Ed25519(n), fp, web?}`: proves the anchor's identity and gives its certificate hash and HTTPS origin |
 | `rv_anchors {}` | ours | → `{a: "<anchor lines>"}`: the best 32 plus 8 random entries from the responder's book |
 | `rv_check {ip, port}` | ours | "please ask a *different* anchor to `rv_hi` this address and tell me the result" (reachability check, §4.5) |
 | `rv_listen {k, ts, sig}` | ours | deliver my messages to this connection (`sig` = Ed25519(`"rv-listen:" ‖ ts`), ±5 min) |
@@ -68,7 +75,7 @@ Transports: **UDP** (native ↔ anchor ↔ Mainline) and **WebSocket** (browser 
 ### 3.2 Formats
 ```
 Address    z32(ed25519_pk)                                                     52 chars
-Anchor     rv-anchor:<z32>@<ip>:<port>[;ws=<url>][;q=<0-100>]                  one line, ≤ 255 chars
+Anchor     rv-anchor:<z32>@<ip>:<port>[;fp=<b64 cert sha-256>][;web=<https origin>][;q=<0-100>]   ≤ 255 chars
 Beacon     pkarr: sig 64 | seq 8 | DNS packet, TXT "_rv" = "c=<anchor ws url>" ≤ 1000 B
 Message    from_pk 32 | iv 12 | AES-GCM_K( ts 8 | bencode(body) ) | tag 16     ≤ 1024 B
 K          HKDF-SHA256( X25519(ed→x(sk), ed→x(pk_peer)), salt = sorted(pk_a ‖ pk_b) )
@@ -82,7 +89,7 @@ TURN       user = "<expiry>:<z32>", pass = base64(HMAC-SHA1(anchor_secret, user)
 
 ### 4.1 One format: an anchor line
 ```
-rv-anchor:8pzq4…k3a@203.0.113.7:4799;ws=wss://a.example.org;q=93
+rv-anchor:8pzq4…k3a@203.0.113.7:4799;fp=Xk3…;web=https://a.example.org;q=93
 ```
 - **Greppable:** readers scan *any* text for `rv-anchor:[^\s"'<]+`. A list can be embedded in a web page, a README, a tweet, a gist, a Nostr note, a DNS TXT record, a QR code or a printed flyer, and **every one of them is a channel with zero code**.
 - **Self-verifying:** a line is only a *claim*. Before a node relies on an anchor or passes it on as verified, it sends `rv_hi` with a random nonce, and the anchor must sign it with the key in the line. A fake line costs the reader one ping.
@@ -104,7 +111,7 @@ score q    = round(100 · ok · min(1, days_known / 7)^½)      ties → lower r
 | **Local cache** | n/a | everyone | IndexedDB / `~/.config/rv/anchors.txt`. After the first run, nothing else is needed |
 | **Baked-in list** | the npm package / repo `anchors.txt` | everyone | updated on every release |
 | **Invite link** | `…#rv=<addr>&a=<1–3 anchor lines>` | everyone | the person inviting you bootstraps you |
-| **HTTP** | every anchor: `GET /anchors.txt`, `/.well-known/rv-anchors.txt` | everyone | also from any static host: GitHub raw, gists, IPFS gateways, Pages |
+| **HTTP** | every anchor: `GET /anchors.txt`, `/.well-known/rv-anchors.txt`; also `POST /krpc` with `rv_anchors` | everyone (browsers: `https` origins, or any origin when the page is `http`) | also from any static host: GitHub raw, gists, IPFS gateways, Pages |
 | **Any text URL** | anyone | everyone | `sources: ['https://…']`. Any page containing anchor lines works |
 | **DNS TXT** | the domain owner (one TXT string per line) or an anchor run with `--dns` (answers TXT on UDP 53) | native: plain DNS; **browsers: public DoH JSON** (`cloudflare-dns.com`, `dns.google`) | `dig TXT _rv-anchors.example.org` |
 | **DoH** | every anchor: `GET /dns-query` (RFC 8484) | everyone | same responder as `--dns` |
@@ -114,6 +121,21 @@ score q    = round(100 · ok · min(1, days_known / 7)^½)      ties → lower r
 | **mDNS / DNS-SD** | every native node | native | `_rv._udp.local` PTR + TXT (one anchor line per TXT string) |
 | **Copy / paste / QR / file** | `rv anchors` prints the book | everyone | sneakernet works too |
 | **ICMP echo** | spec only | n/a | requires raw sockets, which JavaScript runtimes don't have. Defined in `SPEC.md` for native ports (request payload `RV?`, the echo reply carries anchor lines) |
+
+### 4.3b What a browser can reach (and how we use all of it)
+Browsers have plenty of ways out. The one hard rule is **mixed-content blocking**: a page loaded over `https://` may not make `http://` or `ws://` requests to other hosts. Everything below respects it.
+
+| Browser method | Reaches | Works from an HTTPS page? | Used for |
+|---|---|---|---|
+| **WebRTC** (`webrtc-direct`, zero SDP) | any anchor `IP:port` over UDP | ✅ (not subject to mixed content) | KRPC to **every** anchor, no domain needed |
+| **fetch GET/POST** to `https://…` | anchors with `web=`, any static host, pkarr relays, gists, IPFS gateways | ✅ needs a valid cert and CORS (we send `Access-Control-Allow-Origin: *`; GitHub raw, IPFS gateways and DoH resolvers do too) | `/anchors.txt`, `POST /krpc`, Beacons via pkarr relays |
+| **DNS over HTTPS** (`cloudflare-dns.com`, `dns.google` JSON API) | any domain's TXT records | ✅ | anchor lines published as DNS TXT, with no server of ours involved |
+| **WebSocket** `wss://` | anchors with `web=` | ✅ | low-latency KRPC |
+| **fetch / WebSocket to `http://` or `ws://`** | any anchor `IP:port` over TCP | ⚠️ only when the page itself is served over `http://` (e.g. an anchor serving the app) or from `localhost` | KRPC, `/anchors.txt` |
+| **WebTransport** with `serverCertificateHashes` | anchor `IP:port` over QUIC, no domain | ✅ in Chromium and Firefox | **not used:** it would need a QUIC/HTTP3 stack, and WebRTC already covers this case |
+| **Pasted text / QR / invite links / `localStorage` / IndexedDB** | n/a | ✅ | offline bootstrap and the cache |
+
+So **a browser on any HTTPS site can use every anchor** (via WebRTC) and also gets the list from every HTTPS source on the web. Anchors with a domain (or a free `cloudflared` tunnel) add plain HTTPS and `wss://` on top, for networks that block UDP.
 
 Bootstrap order (all started in parallel, first verified anchor wins): cache → baked-in → invite → LAN (broadcast/mDNS) → configured sources/DoH → Mainline `get_peers`. Then `rv_anchors` on every anchor reached fills the book.
 
@@ -177,7 +199,7 @@ The anchor line gains the certificate hash: `rv-anchor:<z32>@<ip>:<port>;fp=<bas
 | `src/book.js` | anchor lines: parse (grep), format, score, merge, probe scheduling, persistence interface | ⬜ ~150 |
 | `src/peer.js` | `create · publish · resolve · send · on · connect · listen · anchors` | ✏️ |
 | `src/rtc.js` | zero-SDP DataChannel setup | ✏️ from `webrtc.js` |
-| `src/anchor.js` | UDP demux (KRPC · STUN/TURN · LAN `RV?`) · HTTP (`/anchors.txt`, `/dns-query`, `/rv/*.js`) · WebSocket · rate limits | ✏️ |
+| `src/anchor.js` | UDP demux (KRPC · STUN/TURN · DTLS for `webrtc-direct` · LAN `RV?`) · HTTP (`POST /krpc` + long poll, `/anchors.txt`, `/dns-query`, `/rv/*.js`) · WebSocket · rate limits | ✏️ |
 | `src/turn.js` | TURN subset (RFC 5766) + quotas | ⬜ ~200 |
 | `src/lan.js` | broadcast/multicast responder + client, mDNS responder + query | ⬜ ~110 |
 | `src/portmap.js` | NAT-PMP/PCP + UPnP-IGD | ⬜ ~100 |
@@ -225,7 +247,7 @@ Native: `rv node` (a peer that promotes itself to an anchor when reachable) or `
 | `channels` | a fresh node with an empty cache bootstraps through each channel separately: HTTP, any-text URL, DoH (local responder), KRPC, `get_peers`, UDP broadcast, mDNS, file, invite link |
 | `promotion` | a node reachable from a second anchor becomes an anchor; an unreachable one doesn't |
 | `anchor` / `turn` | messaging across 3 anchors; STUN; TURN allocate/permission/data; quotas; rate limits |
-| `browser` | two Chromium pages: bootstrap from `/anchors.txt`, connect direct and forced-relay |
+| `browser` | two Chromium pages **served over https** (self-signed test origin): bootstrap via DoH (local resolver), `https` `/anchors.txt` and `webrtc-direct` to an IP-only anchor; KRPC over `POST /krpc`, WebSocket and DataChannel; connect direct and forced-relay |
 | `webrtc-unit` | STUN/MI/FINGERPRINT vectors (RFC 5769), CRC-32c vectors, DTLS PRF vector, SCTP chunk round trips, packet-loss simulation (20% drop) still delivers 1 MB in order |
 | `webrtc-interop` | **our subset ↔ real Chromium** (Playwright), with our side as DTLS client *and* as server; native ↔ native; native ↔ native through TURN only; browser → anchor `webrtc-direct` running KRPC |
 | `bun` | `anchor` + `book` + `webrtc-interop` (native side) pass under Bun |
