@@ -1,47 +1,64 @@
-# CORVAX: Plan v1.0 (frozen scope)
+# CORVAX: Plan v1.0
 
-> **Status: implemented.** All 18 tests pass under Node, the runtime smoke test passes under Bun and Deno, Chromium passes locally, and our records round-trip through the public pkarr relay. See §15 for what is verified and what is still open.
-
-> **Find any peer by its key, from any runtime, and open an encrypted WebRTC DataChannel to it.**
+> **Find any peer by its key or by a topic, from any runtime, and open an encrypted WebRTC DataChannel to it.**
 > The infrastructure introduces. The peers communicate.
+
+This document is the implementation specification. Wire-level details are mirrored in `SPEC.md` (protocol `cx/1`).
 
 ---
 
 ## 1. Scope
 
-CORVAX does five things and then gets out of the way:
+CORVAX does seven things and then gets out of the way:
 
 1. **Identity:** one seed → an Ed25519 identity key (the permanent address) + an X25519 encryption key.
 2. **Anchor book:** every node keeps a verified, scored list of public anchors (the bootstrap nodes) and shares it over every channel it has.
-3. **Discovery:** publish a signed record under your address; anyone can resolve it.
+3. **Discovery by key:** publish a signed record (Beacon) under your address; anyone can resolve it.
 4. **Signalling:** send small, signed and encrypted messages to an address.
-5. **Connection:** `connect(address)` returns an open channel: a direct `RTCDataChannel` when possible, otherwise **relayed through any third peer** both sides can reach (a browser, a native node or an anchor), end-to-end encrypted (§7).
+5. **Connection:** `connect(address)` returns an open channel: a direct `RTCDataChannel` when possible, otherwise relayed through any third peer both sides can reach, end-to-end encrypted.
+6. **Topic presence:** peers publish leased, signed provider records for topics they take part in; anyone can search a topic and watch its presence change.
+7. **Topic broadcast:** short, signed, best-effort messages spread peer-to-peer among a topic's members over WebRTC.
+
+The protocol ends at open DataChannels, presence results and delivered broadcasts. What peers do with them is up to them.
+
+### Roles (independent capabilities)
+
+| Role | Who | Does |
+|---|---|---|
+| **Provider** | any peer, including NATed and browser peers | publishes leased presence for the topics it takes part in |
+| **Searcher** | any peer | searches and watches topics |
+| **Storage node** | a publicly reachable native node (in practice every anchor, unless started with `--no-storage`) | stores and serves leased topic records it is sent; validates them; **not a topic authority** |
+| **Anchor** | a native node with verified public UDP and HTTP | bootstrap, DHT, inboxes, STUN, homepage, anchor book |
+| **Relay** | any peer with WebRTC, within its limits | bridges two DataChannels when no direct path exists |
+
+Offline peers can't renew leases or answer. **An unexpired lease is evidence of a recent publication, never proof that the peer is online now.**
 
 ### Out of scope, permanently
-- Anything on top of the DataChannel (framing, RPC, files, media)
-- Peer gossip, introductions, rooms/topics, reputation, incentives, telemetry
-- Our own WebRTC stack (browsers have one; native runtimes use a standard library, §8)
-- WebSocket, WebTransport, UPnP/NAT-PMP, running DNS servers, ICMP, pkarr HTTP endpoints, crypto fallbacks for old browsers (unsupported browsers get a clear `unsupported` error)
+- Anything on top of a DataChannel (framing, RPC, files, media)
+- Rooms, chat history, durable or acknowledged messaging, replay or late-join delivery, global membership lists, group encryption
+- Peer gossip beyond bounded topic broadcast, introductions, reputation, incentives, telemetry, any central topic service
+- Our own WebRTC stack (browsers have one; native runtimes use a standard library, §11)
+- WebSocket, WebTransport, TURN, UPnP/NAT-PMP, running DNS servers, ICMP, pkarr HTTP endpoints, crypto fallbacks for old browsers (unsupported runtimes get a clear `unsupported` error)
+- Using Mainline BEP 5 `get_peers`/`announce_peer` as a topic index (it is only used for the anchor directory)
 
 ### Done when
-- [x] `npm test` is green under Node (18 tests); `test/runtime-smoke.js` passes under Bun 1.4 and Deno 2.9; browser tests pass in Chromium (Firefox and WebKit run in CI)
-- [x] A Beacon from our code round-trips through the public pkarr relay (real Mainline compatibility): `node test/live/pkarr.js`
-- [ ] **The proof:** two browsers on unrelated networks, knowing only each other's address, open a verified **direct** DataChannel. *Proven on one machine (Chromium, `test/browser.test.js`); needs a run across two real networks*
-- [x] When direct is impossible, the same two browsers connect **through a third peer**, via another browser (`browser` test) and via an anchor (`relay` test); a Node peer ↔ browser works with the default native WebRTC library
-- [ ] A fresh node with no configuration finds anchors via the homepage/HTTP ✅, DNS TXT ✅ (reader checked live with `test/live/doh.js`), the LAN ✅ (broadcast and mDNS) and the Mainline DHT (protocol tested locally in `dht`; a live Mainline run needs outbound UDP, which this sandbox blocks)
-- [x] Every HTTP-reachable node serves the homepage (2.1 KB)
-- [x] README + `SPEC.md` written. From then on: bug fixes only.
+- [x] `npm test` green under Node; `test/runtime-smoke.js` green under Bun and Deno; browser tests green in Chromium (Firefox/WebKit in CI)
+- [x] A Beacon round-trips through the public pkarr relay (`node test/live/pkarr.js`)
+- [x] Two browsers connect directly and through a third peer; Node ↔ browser works with the default WebRTC library
+- [x] Every HTTP-reachable node serves the homepage / plain anchor list
+- [ ] Topic presence and broadcast implemented and tested as in §§8–9 and §15
+- [ ] Two browsers on two real networks; live Mainline DHT run (need an environment with outbound UDP)
+- [ ] README + `SPEC.md` describe topics. From then on: bug fixes only.
 
 ---
 
 ## 2. Built to last
 
-- **Standard foundations:** BitTorrent KRPC (BEP 5, 43, 44), pkarr records, DNS TXT, HTTP/1.1, STUN (RFC 5389, binding only), mDNS, and the W3C WebRTC and WebCrypto APIs.
-- **Our own protocol on top, versioned as `cx/1`:** the `cx_*` queries, anchor lines, the message format, the anchor book rules and the connect flow. These are specified in `SPEC.md` with test vectors. The protocol only grows: fields and queries never change meaning, new ones get new names, and unknown fields are ignored.
-- **Core has zero runtime dependencies and no build step.** Plain ESM JavaScript; the browser loads the same files Node runs. Native runtimes get one *optional* default WebRTC library (§8).
-- **Standard crypto only:** WebCrypto Ed25519, X25519, HKDF-SHA256, AES-GCM, SHA-1/256. No custom key conversions.
-- **Small but not at the expense of safety.** Target is roughly 1,600 lines; correctness and tests come first.
-- **Platforms:** current Chrome, Firefox, Safari; Node ≥ 22, Bun ≥ 1.1, Deno ≥ 2 (via `npm:corvax`).
+- **Standard foundations:** BitTorrent KRPC (BEP 5, 43, 44), pkarr records, DNS TXT, HTTP/1.1, STUN binding (RFC 5389), mDNS, and the W3C WebRTC and WebCrypto APIs.
+- **Our own protocol on top, `cx/1`:** the `cx_*` queries, anchor lines, messages, topic records, broadcasts, the anchor book rules and the connect flow (`SPEC.md`). It only grows: fields and queries never change meaning, new ones get new names, unknown fields are ignored.
+- **Core has zero runtime dependencies and no build step.** Plain ESM JavaScript; browsers load the same files Node runs. Native runtimes get one optional default WebRTC library (§11).
+- **Standard crypto only:** WebCrypto Ed25519, X25519, HKDF-SHA256, AES-GCM, SHA-1/256.
+- **Platforms:** current Chrome, Firefox, Safari; Node ≥ 22, Bun ≥ 1.1, Deno ≥ 2.
 
 ---
 
@@ -49,7 +66,7 @@ CORVAX does five things and then gets out of the way:
 
 ```
           UDP (KRPC · STUN)                            HTTP POST /krpc
- Mainline ◄───────────────► ANCHOR ◄──────────────────────────────── any client
+ Mainline ◄───────────────► ANCHOR + STORAGE ◄─────────────────────── any client
  DHT nodes                     ▲ ▲                                   (browser, Node, Bun, Deno, curl)
                      UDP KRPC  │ │ LAN: broadcast "CX?" + mDNS
                       ANCHOR ◄─┘ └─► native nodes on the same network
@@ -57,19 +74,16 @@ CORVAX does five things and then gets out of the way:
  PEER A ◄═════════════════════ RTCDataChannel (direct) ═════════════════════► PEER B
  PEER A ◄════ RTCDataChannel ════► PEER C (any peer) ◄════ RTCDataChannel ════► PEER B
         └──────────── end-to-end encrypted relayed channel (fallback) ───────────┘
+
+ topic "chess":  provider records ──► 5 closest storage nodes ◄── search / watch (one long poll per node)
+                 broadcast:  A ──► ≤ 4 topic neighbours ──► each forwards to ≤ 3 more, ≤ 4 hops
 ```
-
-| Role | Who | Does |
-|---|---|---|
-| **Anchor** | a native node with at least one verified public service (UDP and/or HTTP) | DHT node (if UDP), HTTP `/krpc` + homepage (if HTTP), inboxes, STUN, anchor book, LAN responder, **and a peer like any other** (it can relay) |
-| **Native peer** | Node/Bun/Deno behind NAT | HTTP client; keeps and shares an anchor book; LAN responder; can relay |
-| **Browser peer** | any web page; **opportunistic**: may sleep or vanish at any time | HTTPS client; keeps and shares an anchor book; can relay while open |
-
-**Every peer can relay.** Relaying needs no special server, only a WebRTC connection to both sides. Anchors are simply the peers that everyone can reach.
 
 **Two transports, one message format (bencoded KRPC):**
 - **UDP:** node ↔ node, Mainline, STUN, LAN discovery.
-- **HTTP `POST /krpc`:** every client ↔ anchor. Browsers need an HTTPS origin (`web=`, e.g. through a Cloudflare tunnel; the tunnel covers HTTP only, not the anchor's UDP DHT/STUN). Natives may use `http://ip:port`.
+- **HTTP `POST /krpc`:** every client ↔ anchor/storage node. Browsers need an HTTPS origin (`web=`, e.g. a Cloudflare tunnel, which carries HTTP only). Natives may use `http://ip:port`.
+
+Topic broadcasts travel only over WebRTC DataChannels between peers.
 
 ---
 
@@ -81,289 +95,316 @@ Identity   Ed25519 key  = from HKDF(seed, "cx/ed25519")    → address = z32(ed_
 Encryption X25519 key   = from HKDF(seed, "cx/x25519")     → published in the Beacon, signed by the identity key
 Anchor     corvax-anchor:<z32>@<ip>:<port>[;web=<https origin>][;q=<0-100>]                 ≤ 255 chars
 Beacon     pkarr signed packet (BEP 44 mutable item at SHA1(ed_pk)), ≤ 1000 B, TXT "_cx":
-           x=<b64 x25519_pk>   c=<inbox anchor url> (1..n)   [app-defined k=v]
-Message    eph_x 32 | iv 12 | AES-GCM_K( inner ) | tag 16                                ≤ 4 KB
-           K     = HKDF-SHA256( X25519(eph_sk, recipient_x), info = "cx/msg" ‖ eph_x ‖ recipient_x )
-           inner = bencode{ from: ed_pk, to: recipient_ed_pk, id: 16 B, ts, body } ‖ Ed25519 sig over all of it
-Relay      frame = counter 8 | AES-GCM_Kdir(data) | tag 16;  Kdir = HKDF(X25519(eph_a, eph_b), "cx/relay" ‖ sid ‖ direction)
+           x=<b64 x25519_pk>   c=<anchor line of an inbox> (1..n)   [app-defined k=v]
+Message    eph_x 32 | iv 12 | AES-GCM_K( inner ‖ sig ) | tag 16                        ≤ 4 KB
+           K     = HKDF-SHA256( X25519(eph_sk, recipient_x), "cx/msg" ‖ eph_x ‖ recipient_x )
+           inner = bencode{ from, to, id: 16 B, ts, body: UTF-8 JSON };  sig = Ed25519(inner)
+Relay      frame = sid 9 | counter 8 | AES-GCM_Kdir(type 1 | data);  Kdir = HKDF(X25519(eph_a, eph_b), "cx/relay" ‖ sid ‖ dir)
+Topic      §8.1       Provider record  §8.2       Broadcast  §9.2
 ```
-- **Sealed sender:** each message uses a fresh ephemeral X25519 key, so a recipient's long-term key alone can't decrypt past messages, and keys are never reused across directions.
-- **Sender attribution comes from the Ed25519 signature,** not from the shared key. The signature covers `to`, which stops reflection and redirection attacks.
-- **Receivers accept a message only if** the signature is valid, `to` is them, `|now − ts| < 10 min`, and the `id` is new. A sender's X25519 key is learned from its Beacon when it's needed (e.g. to reply).
+Messages are accepted only if they decrypt, the signature verifies, `to` is the recipient, `|now − ts| < 10 min`, and `id` is new. The signature covers `to`, which stops reflection and redirection.
 
 ---
 
-## 5. Protocol `cx/1` (KRPC)
+## 5. Protocol `cx/1` (KRPC queries)
 
 | Query | Source | Request → Reply |
 |---|---|---|
 | `ping`, `find_node` | BEP 5 | routing |
-| `get_peers`, `announce_peer` | BEP 5 | anchors announce on infohash `SHA1("corvax anchors v1")`. **One opportunistic bootstrap source**, not an authority: results can be stale or hostile and are verified like any other line |
-| `get`, `put` | BEP 44 | resolve / publish a Beacon (signature, seq and token checked) |
-| `cx_hi {n}` | ours | → `{k, sig=Ed25519("cx-hi" ‖ n), web?}`: proves the anchor holds its key (identity only, says nothing about reachability) |
-| `cx_anchors {}` | ours | → `{a}`: best 32 + 8 random anchor lines |
-| `cx_check {port}` | ours | the anchor asks a *different* anchor to probe the caller's UDP and HTTP → `{udp, http}` |
-| `cx_send {to, msg}` | ours | → `{queued}`: stored for that address (2 min, ≤ 64 per address, dedup by message `id`, so retries are idempotent). *Queued ≠ delivered*; delivery is only known when the peer answers |
-| `cx_listen {k, ts, sig, after?}` | ours | **long poll**, waits ≤ 25 s → `{msgs: [{seq, msg}]}`. `after` acknowledges everything up to that `seq`, which the anchor then deletes (at-least-once delivery; receivers dedup by `id`). A newer poll for the same key ends the older one with an empty reply |
+| `get_peers`, `announce_peer` | BEP 5 | **anchor directory only**: infohash `SHA1("corvax anchors v1")`. Results are verified like any other anchor line |
+| `get`, `put` | BEP 44 | resolve / publish a Beacon. Recursive over HTTP |
+| `cx_hi {n}` | ours | → `{k, sig = Ed25519("cx-hi" ‖ n), line?, st?}`; `st: 1` = this node is a storage node |
+| `cx_anchors {me?}` | ours | → `{a}`: own line + best 32 + 8 random anchor lines |
+| `cx_check {k, port, hport}` | ours | asks a *different* anchor (`cx_probe`) whether strangers reach the caller → `{udp, http, ip, by}` |
+| `cx_probe {ip, port, hport, k}` | ours | anchor ↔ anchor only |
+| `cx_send {to, msg}` | ours | → `{queued}` (inbox, 2 min, ≤ 64 per address, deduplicated) |
+| `cx_listen {k, ts, sig, after?}` | ours, HTTP | inbox long poll, ≤ 25 s, acked by `after` |
+| `cx_tpub {r: [record]}` | ours | **topics** (§8.4): store ≤ 32 provider records → `{ok: [status], now}` |
+| `cx_tfind {t: [topic id]}` | ours | **topics**: ≤ 16 topic ids → `{r: [record], now}` |
+| `cx_twatch {t: [topic id], c?}` | ours, HTTP | **topics**: one long poll for ≤ 64 topics → `{c, snap?, r: [record], now}` |
 
-**HTTP details:**
-- **Requests:** `POST /krpc` with `Content-Type: text/plain` (a CORS "simple request", so browsers send no preflight). `OPTIONS` is still answered. Body ≤ 8 KB.
-- **Every reply is a KRPC reply**, including errors.
-- **Clients retry** with backoff, and the same `t` (transaction id) is answered from a short replay cache, so a retried `POST` never executes twice.
+**HTTP:** `POST /krpc`, `Content-Type: text/plain` (no CORS preflight), body ≤ 8 KB. Every reply is KRPC, including errors. A repeated `t` from the same IP within 60 s gets the cached reply, so retries are idempotent.
 
-**Anchor HTTP endpoints:** `GET /` (homepage = anchor list) · `POST /krpc` · `GET /cx/*.js` (the library) · `GET /logo` (the lightweight logo, long cache) · `GET /favicon.ico` · `GET /demo`. CORS `*` everywhere.
+**HTTP endpoints:** `GET /` (homepage for browsers, plain anchor lines for everything else, `Vary: Accept`) · `POST /krpc` · `GET /cx/*.js` · `GET /logo` · `GET /favicon.ico` · `GET /demo`. CORS `*`.
 
 ### The homepage (`GET /`)
-Every node reachable over HTTP serves a thin page, so anyone who stumbles on it learns what it is and how to join.
-0. **The CORVAX logo** (the lightweight version from `/logo`, ~48 px) and the name
-1. **What this is:** two sentences ("A CORVAX anchor: it helps peers find each other by key and open direct WebRTC connections. It stores nothing but signed address records and short-lived encrypted messages.")
-2. **This node:** its anchor line, which services it offers (UDP/HTTP/relay), and its uptime
-3. **How to use it:**
-   - browser: `import { Peer } from '<origin>/cx/index.js'`
-   - native: `npx corvax node`
-   - shell: `curl -s <origin>` (plain anchor lines; see below)
-   - plus links to `/demo` and the repo
-4. **Known anchors:** the shared view, one anchor line per row with its score, in a `<pre>`
-
-Rules:
-- server-rendered from one template string, **no JavaScript, no external requests** (the only extra request is the same-origin `/logo`: 96 px, 2.9 KB, shown at 48 px, cached for a year)
-- ≤ 10 KB, system font, dark and light mode, readable on a phone
-- every dynamic value HTML-escaped
-- **it is the anchor list:** there's no `/anchors.txt` endpoint, and machines use `cx_anchors`.
-- **Content negotiation on `GET /`:** clients whose `Accept` header includes `text/html` (browsers) get the page. Everything else (`curl`, `wget`, scripts, `fetch()`) gets `text/plain`: the node's own line first, then its shared view, one anchor line per line, with `Vary: Accept`. The HTML page contains the same lines verbatim, so grepping it works too.
+- **Content (browsers):** the logo and name; what this node is (two sentences); its anchor line, services (UDP/HTTP/relay/storage) and uptime; how to use it (browser import, `npx corvax node`, `curl -s <origin>`, links to `/demo` and the repo); known anchors in a `<pre>`.
+- **Rules:** one template, no JavaScript, no external requests (only the same-origin `/logo`, 2.9 KB), ≤ 10 KB, dark and light mode, readable on a phone, every value HTML-escaped.
+- **Everything else** (`curl`, `wget`, scripts, `fetch()`) gets `text/plain`: own line first, then the shared view, one anchor line per line. There's no `/anchors.txt`.
 
 ---
 
 ## 6. The anchor book
 
-**Line:** `corvax-anchor:<z32>@203.0.113.7:4799;web=https://a.example.org;q=93`. Readers grep any text for `corvax-anchor:[^\s"'<]+`. Web pages, READMEs, gists, DNS TXT records, invite links and pasted text all work as sources with no extra code.
+**Line:** `corvax-anchor:<z32>@203.0.113.7:4799;web=https://a.example.org;q=93`. Readers grep any text for `corvax-anchor:[^\s"'<>`]+` and strip trailing punctuation.
 
-**Each entry tracks every service separately**, so a working HTTPS tunnel can't make a dead DHT port look healthy:
-```
-identity_verified   cx_hi signature valid (with a random nonce)
-http_ok / udp_ok / rtc_ok     EWMA(probe success, α = 0.2) per service (rtc = it accepts WebRTC, so it can relay)
-rtt, first_seen, last_ok
-```
-- **Score:** `q = round(100 · ok · (0.6 + 0.4 · √min(1, days_known/7)))`, so a freshly verified anchor (60) outranks any unverified hint (≤ 50). Browsers rank by `http_ok`, natives by `udp_ok` (falling back to `http_ok`). A `q` received from others is only a hint, capped at 50 until verified locally.
-- **Size and pruning:** ≤ 1000 entries; dropped when `q < 10` and no success for 7 days. Anchors re-probe 64 entries every 10 min (≤ 16 unverified probes per minute).
-- **Shared view:** best 32 + 8 random (so new anchors spread before they have a score).
-- **Spreading:** every 10 min each anchor pulls `cx_anchors` from 3 random anchors. Clients pull from every anchor they use. New anchors `announce_peer` and send `cx_hi` to known anchors, which probe back.
+- **Per entry:** `verified` (`cx_hi` passed), `storage` (`cx_hi` said `st: 1`), and per-service EWMA scores `http`, `udp` (α = 0.2), plus `rtt`, `first`, `lastOk`.
+- **Score:** unverified → `min(hint, 50)`. Verified → `round(100 · ok · (0.6 + 0.4 · √min(1, days_known/7)))`, where `ok` = `http` for browsers and `max(udp, http)` for natives.
+- **Kept tidy:** ≤ 1000 entries; dropped when score < 10 and no success for 7 days, or immediately when `cx_hi` shows a different key.
+- **Shared view:** best 32 + 8 random (new anchors spread before they have a score).
+- **Anchors every 10 min:** probe ≤ 64 entries (≤ 16 unverified), pull `cx_anchors` from 3 random anchors, `announce_peer` on the anchor topic.
 
-**Bootstrap channels** (all tried in parallel, the first verified anchor wins):
+**Bootstrap sources** (in parallel; the first verified anchor wins):
+- local cache (`localStorage` / `~/.config/corvax/anchors.txt`)
+- the built-in list `src/anchors.js`
+- any text: invite links, files, URLs, any anchor's homepage (`sources`)
+- `cx_anchors` on known anchors
+- DNS TXT `_corvax-anchors.<domain>` (browsers via public DoH JSON)
+- natives only: Mainline `get_peers` on the anchor topic; LAN `CX?` on UDP 4798 and mDNS `_corvax._udp.local`
 
-| Channel | Browser | Native |
-|---|---|---|
-| Local cache (`localStorage` / `~/.config/corvax/anchors.txt`) | ✅ | ✅ |
-| Built-in list `src/anchors.js` (a module, so bundlers and browsers can import it) | ✅ | ✅ |
-| Any text: invite link, paste, file, any URL incl. any anchor's homepage (`sources: [...]`) | ✅ (HTTPS + CORS) | ✅ |
-| `cx_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
-| DNS TXT `_corvax-anchors.<domain>` (`dohDomains: [...]`) | ✅ via public DoH JSON | ✅ via system resolver |
-| Mainline `get_peers` on the anchor infohash | ❌ | ✅ |
-| LAN: UDP broadcast/multicast `CX?` on port **4798**, mDNS `_corvax._udp.local` TXT | ❌ | ✅ (every native node answers) |
-
-**Automatic promotion:** every native node calls `cx_check` at start and every 30 min. Each service that strangers can reach is switched on: UDP → DHT server mode, STUN, `announce_peer`; HTTP → homepage and `/krpc` for others. Relaying is on for every peer anyway. `--no-anchor` opts out.
+**Automatic promotion:** native nodes call `cx_check` at start and every 30 min. When UDP and HTTP are reachable from a stranger, the node becomes an anchor (DHT server mode, STUN, `announce_peer`) and, unless `--no-storage`, a storage node. `--no-anchor` opts out.
 
 ---
 
 ## 7. `connect(address, { relay })`
 
-Plain standard offer/answer. **No SDP templates and no SDP editing.**
+Plain standard offer/answer, no SDP templates or editing. Every connection has two pre-negotiated DataChannels: id 0 (the payload channel) and id 1 `cx` (control).
 
-### 7.1 Direct
-```
-1 RESOLVE  Beacon of B (newest valid seq) → B's x25519 key + inbox anchors
-2 ICE      iceServers = STUN on own anchors
-3 OFFER    A: createOffer → setLocalDescription → msg {t:'offer', sid, sdp}
-4 ANSWER   B: setRemoteDescription → createAnswer → setLocalDescription → msg {t:'answer', sid, sdp}
-5 TRICKLE  both send msg {t:'cand', sid, c} as candidates appear; candidates that arrive early are queued
-6 OPEN     DataChannels open: id 0 = the app's channel, id 1 = "cx" control channel (both negotiated)
-```
+**Direct:**
+1. **Resolve:** look up B's Beacon (newest valid seq) to get B's X25519 key and inbox anchors.
+2. **ICE:** use STUN on our own anchors.
+3. **Offer:** A sends `{cx:'offer', sid, sdp, p}`, where `p` is `'app' | 'relay' | 'topic'`; topic offers also carry `tp` (§9.1).
+4. **Answer:** B replies `{cx:'answer', sid, sdp}`, or `{cx:'busy', sid}` when it declines a `relay`/`topic` offer.
+5. **Trickle:** both send `{cx:'cand', sid, c, m, i}`; candidates that arrive early are queued.
+6. **Open:** both DataChannels open.
 
-### 7.2 Relayed through a third peer (automatic when direct fails, default)
-If ICE fails or times out (10 s), A and B pick a third peer **C** that both can reach, and C bridges two ordinary DataChannels:
-```
-1 OFFER VIA   A → B  msg {t:'via?', sid, eph_a, via: [up to 8 addresses]}
-              via = A's currently connected peers that relay, then A's best anchors (anchors are peers too)
-2 PICK C      B prefers an address it is already connected to; otherwise it tries a direct connect()
-              to the candidates in order (no relaying for this hop, so no recursion); the first that works is C
-3 ACCEPT      B → A  msg {t:'via', sid, eph_b, c: C}            (A connects to C directly if not already)
-4 BRIDGE      A and B each send on their control channel to C:  {t:'bridge', sid, to: other address}
-              C pairs the two requests (both must be its direct peers, same sid), then forwards frames
-5 CHANNEL     A and B now have a relayed channel with the same interface as RTCDataChannel
-              frames end-to-end encrypted with directional keys from eph_a/eph_b (§4); C only sees ciphertext
-```
-- **Result:** `{ channel, kind: 'direct' | 'peer', via? }`. The app gets the same channel interface either way.
-- **Policy:** `relay: 'fallback'` (**default**: direct first, then through a peer) or `'never'` (direct only → error `'ice-failed'`).
-- **Relaying for others:** every peer does it by default within its limits (§9). Opt out with `relayFor: false` (`--no-relay` on the CLI).
-- **Identity binding:** offers, answers and `via` messages travel inside signed, encrypted messages. So the DTLS fingerprints *and* the relay session keys are bound to both peers' Ed25519 keys, and neither C nor anyone else can swap them.
-- **No TURN at all:** anchors relay the same way any other peer does. That works because they are publicly reachable, so both sides can always open a direct DataChannel to them.
+**Through a third peer** (default when direct fails, `relay: 'fallback'`):
+1. A sends `{cx:'via?', sid, e, via, p, tp?}`.
+2. B picks C (a peer it is already connected to, otherwise the first one it can reach directly) and replies `{cx:'via', sid, e, c}` or `{cx:'via-no'}`.
+3. A and B each ask C to bridge on the control channel; C pairs the two requests and forwards end-to-end encrypted frames. C sees only ciphertext.
 
-Errors: `'not-found' | 'no-answer' | 'ice-failed' | 'no-relay' | 'timeout' | 'no-webrtc' | 'unsupported'`
+`connect()` returns `{ channel, kind: 'direct' | 'peer', via? }`.
+Errors: `not-found | no-answer | ice-failed | busy | no-relay | timeout | no-webrtc | unsupported`.
 
 ---
 
-## 8. WebRTC outside browsers: a default you can replace
+## 8. Topic presence
+
+### 8.1 Topic names and ids
+```
+normalize(name) = NFKC → trim → collapse whitespace to " " → lowercase;  1–200 bytes UTF-8 after normalization
+topic id        = SHA-256("cx/topic:" ‖ normalize(name))                     32 bytes
+```
+Topics belong to nobody. Storage nodes see only ids, never names. Ids are not secret: anyone who guesses a name can compute its id.
+
+### 8.2 Provider record
+```
+fields  = bencode { t: topic id 32, k: provider ed_pk 32, seq: int, exp: int (ms since epoch) }
+record  = bencode { t, k, seq, exp, sig }      sig = Ed25519("cx-topic" ‖ fields)        ~170 bytes
+```
+- **`seq`:** monotonic per (topic, provider) = `max(previous + 1, now_ms)`.
+- **`exp`:** absolute expiry, `now + skew + LEASE`, with `LEASE` = 10 min.
+- **Tombstone (unpublish):** a record with a higher `seq` and `exp ≤ now`.
+
+### 8.3 Storage node rules (`TopicStore`)
+On every `cx_tpub` record, in order:
+
+| Check | Result |
+|---|---|
+| bad encoding, wrong sizes or bad signature | `bad` |
+| `exp > now + LEASE + SKEW` (SKEW = 60 s) | `future` (publisher clock ahead) |
+| `exp < now − SKEW` and not newer than what is stored | `expired` |
+| stored `seq` > record `seq` | `stale` |
+| stored `seq` = record `seq` | `dup` (no change, no event) |
+| new (topic, provider) beyond limits (≤ 64 topics per provider, ≤ 50 000 records) | `full` |
+| otherwise | `ok`: store and append an event |
+
+- **Storage:** in memory, `topic id → provider → { record, seq, exp }`.
+- **Live** means `exp > now`.
+- **Tombstones** are kept until `now + LEASE + SKEW`, so an older signed record can't be replayed to revive a provider after it unpublished.
+- **Sweep:** every 30 s, delete records past `exp + SKEW` (and tombstones past their retention), and trim the event log.
+
+**Event log:** each accepted record appends `{n, t, record}`. `n` increases by 1 per event; the store has a random `epoch` set at start. The cursor is `epoch:n`. The log keeps ≤ 10 000 events and ≤ 30 minutes.
+
+**`cx_tfind {t}`:** for each id, up to 100 live records, newest first.
+
+**`cx_twatch {t, c}`:**
+- **Snapshot:** when `c` is missing, of another epoch, older than the log or newer than the head, the reply is `{snap: 1, r: live records for t, c: head}` (snapshot resync).
+- **Delta, events waiting:** when events for `t` exist after `c`, the reply is `{r: newest record per (topic, provider) among them, c: head}`.
+- **Delta, nothing yet:** the poll waits up to 25 s for a matching event. After the first one, it waits **2 s more to coalesce**, then replies. On timeout: `{r: [], c: head}`.
+- A newer poll does not end older ones: different clients share a node.
+
+`now` (the node's clock) is in every topic reply.
+
+### 8.4 Provider side (publish, renew, unpublish)
+- **Storage choice:** the 5 verified storage nodes in our own book whose key is XOR-closest to the topic id ("closest suitable"). If one fails, the next closest is tried, up to 8 in total.
+- **Publish:** sign a record and send it to those nodes. It succeeds if at least one accepts, and reports how many did.
+- **Renew:** **one timer** for all published topics, every 5 min ± 20 % jitter. Records are **batched per storage node** (≤ 32 per `cx_tpub`), and every renewal recomputes the closest set, so a failed node is replaced automatically.
+- **Clock skew:** the peer keeps `skew` = median of (storage `now` − local time at reply) over the last 8 topic replies. `exp` uses `now + skew`. A `future` or `expired` status triggers one immediate retry with the updated skew.
+- **Unpublish:** send a tombstone to the same nodes and stop renewing.
+
+### 8.5 Searcher side (search, watch)
+- **Search:** `cx_tfind` on the 8 closest storage nodes. The searcher verifies every record itself (storage is untrusted), keeps the highest `seq` per provider, and drops records that aren't live. Each result: `{ address, presence: 'recent', expires, seq }`.
+- **Watch:** for all watched topics, compute each topic's 5 closest storage nodes, group the topics by node, and run **one multiplexed long poll per storage node** (`cx_twatch` with all of that node's topics, ≤ 64). A change to the watched set restarts the polls with a snapshot.
+  - Records from any node are verified, then merged by `seq`.
+  - **Presence:** `recent` while `exp > now + skew`, otherwise `expired`. A local check every 5 s turns leases that ran out into `expired`.
+  - **Events** are emitted only on transitions: new provider `recent`, renewed-after-expiry `recent`, tombstone or lapsed `expired`.
+- **Failure handling:**
+  - a poll error means exponential backoff (1 s → 30 s)
+  - after 3 consecutive failures the node is marked down in the book (`http` score) and the assignment is recomputed
+  - an invalid or expired cursor gets a snapshot from the node, and the client simply merges it
+
+There are no per-topic polls, per-peer heartbeats or presence pings.
+
+---
+
+## 9. Topic broadcast (best-effort)
+
+### 9.1 Topic neighbours
+- **Link:** one dedicated connection per (peer, topic), opened with `connect(..., p: 'topic', tp: topic id hex)`. It is direct when possible, otherwise relayed through a third peer like any connection. The link's payload channel carries only broadcast frames.
+- **Limits:** **≤ 4 neighbours per topic, ≤ 16 links per peer.**
+- **Accept rule:** a peer accepts a topic offer only if it is subscribed to that topic and below both limits; otherwise it answers `busy`. Accepted offers reserve a slot for 40 s while connecting.
+- **Choosing neighbours:** while subscribed, a peer tops up to 4 neighbours from the topic's `recent` providers. It does this at most twice per maintenance run, after presence changes (1 s debounce) and on each renewal tick. It skips itself, existing links, and addresses that failed in the last 2 minutes.
+
+### 9.2 Broadcast frame (binary, on the topic link)
+```
+signed = bencode { t: topic id, id: 16 random bytes, ts: ms, from: ed_pk, body: ≤ 1024 bytes (UTF-8 JSON) }
+frame  = bencode { t, id, ts, from, body, p: sender's provider record for t, hop: 1..4, sig }     ≤ 4 KB
+sig    = Ed25519("cx-tb" ‖ signed)          (hop is not signed: forwarders decrement it)
+```
+
+### 9.3 Rules
+- **Who may send:** only a peer whose own provider record for the topic is live. `broadcast()` throws `not-published` otherwise.
+- **Origin:** sends to all of its links for the topic (≤ 4) with `hop = 4`. Its own messages are never delivered back to it.
+- **Each receiver, in order:**
+
+  | Drop if | Rule |
+  |---|---|
+  | `t` ≠ the link's topic | wrong topic |
+  | already seen `id` | duplicate cache, kept 10 min |
+  | `now − ts > 2 min` or `ts − now > 60 s` | max age |
+  | `body` > 1024 bytes or frame > 4 KB | size |
+  | bad `sig` | sender |
+  | `p` isn't a valid record for this `t` and `from`, live within SKEW | eligibility |
+  | more than 10 messages from this `from` for this topic in 60 s | rate (the message still counts as seen) |
+
+  Otherwise: deliver it to the subscribers, and if `hop > 1`, forward a copy with `hop − 1` to **at most 3** other links for the topic, chosen at random. The copy never goes back on the incoming link or to `from`.
+
+**What broadcast is not:** no history, replay, storage, acknowledgements, retries, ordering, late-join delivery or group encryption. Peers that aren't connected to the mesh at that moment miss the message. It suits short notices ("I'm here", "new move"), **not chat**.
+
+---
+
+## 10. Limits (defaults, configurable per node/peer)
+
+| Area | Limit |
+|---|---|
+| Records | Beacon ≤ 1000 B; message ≤ 4 KB; provider record ~170 B; broadcast body ≤ 1024 B |
+| HTTP per IP | token bucket, burst 120, 4/s; costs `put` 6, `cx_check` 12, `cx_tpub` 2, `cx_send` 1, `get`/`get_peers`/`cx_tfind` 1, others 0.5; ≤ 64 open long polls; body ≤ 8 KB |
+| DHT | tokens = SHA1(secret ‖ window ‖ ip), 10-minute windows; routing table ≤ 1000 |
+| Topics | lease 10 min; renew 5 min ± 20 %; ≤ 32 records per `cx_tpub`, ≤ 16 ids per `cx_tfind`, ≤ 64 per `cx_twatch`; long poll 25 s; coalesce 2 s; ≤ 64 topics per provider and ≤ 50 000 records per storage node; ≤ 100 providers per topic per reply; event log ≤ 10 000 / 30 min |
+| Broadcast | ≤ 4 neighbours per topic, ≤ 16 links per peer, forward to ≤ 3, hop limit 4, age ≤ 2 min, 10 per sender per topic per minute, duplicate cache 10 min (≤ 10 000 ids) |
+| Relaying | browsers ≤ 2 sessions at 256 kbit/s, natives ≤ 16 at 2 Mbit/s; ≤ 1 GB per hour; idle 2 min |
+
+---
+
+## 11. WebRTC outside browsers
 
 ```js
-// resolution order inside Peer.create():
-RTCPeerConnection = options.RTCPeerConnection          // 1. injected by the app (always wins)
-                 ?? globalThis.RTCPeerConnection        // 2. browsers (and any runtime that adds it)
-                 ?? (await import('werift')).RTCPeerConnection   // 3. the default for Node/Bun/Deno
-                 ?? null                                // 4. none → connect() throws 'no-webrtc'; everything else works
+RTCPeerConnection = options.RTCPeerConnection ?? globalThis.RTCPeerConnection ?? (await import('werift')).RTCPeerConnection ?? null
 ```
-- **Default: `werift`.** It's pure TypeScript and MIT-licensed, with no native binaries, so it runs unchanged on Node, Bun and Deno. It's listed as an **`optionalDependency`**: installed by default, and if it's missing the install doesn't fail and everything except `connect()` still works.
-- **Anchors use it too:** it's how they accept WebRTC and relay. A native node without any WebRTC library still discovers, signals and serves the DHT, but can't relay.
-- **Tested alternative: `node-datachannel`** (libdatachannel, native, faster), e.g. `Peer.create({ RTCPeerConnection: (await import('node-datachannel/polyfill')).RTCPeerConnection })`.
-- **The contract, the minimum interface we use** (documented in `SPEC.md`; any implementation that satisfies it works):
-  - `new RTCPeerConnection({ iceServers, iceTransportPolicy })`
-  - `createDataChannel(label, { negotiated: true, id })` (ids 0 and 1)
-  - `createOffer()`, `createAnswer()`, `setLocalDescription(d)`, `setRemoteDescription(d)`, `addIceCandidate(c)`, `getStats()`, `close()`
-  - events: `onicecandidate`, `onconnectionstatechange` / `connectionState`
-  - channel: `send`, `close`, `readyState`, `binaryType`, `onopen`, `onmessage`, `onclose`
-- **Our tests run against both libraries.** If `werift` ever goes unmaintained, the default moves to `node-datachannel` with no API change.
+- **Default:** `werift` (pure JS, MIT), installed as an optional dependency.
+- **Tested alternative:** `node-datachannel/polyfill`.
+- **Without any library:** everything except `connect()`, relaying and broadcast works.
+- **The contract** (any implementation that satisfies it works):
+  - `new RTCPeerConnection({ iceServers })`
+  - `createDataChannel(label, { negotiated: true, id })`
+  - `createOffer`, `createAnswer`, `setLocalDescription`, `setRemoteDescription`, `addIceCandidate`, `close`
+  - `localDescription`, `remoteDescription`, `onicecandidate`
+  - channels: `send`, `close`, `readyState`, `binaryType`, `onopen`, `onmessage`, `onclose`
 
 ---
 
-## 9. Limits enforced in code
-
-- **Beacon:** signature, monotonic seq, ≤ 1000 B, checked on store and on use.
-- **Message:** ≤ 4 KB, signature, `to`, ts window, id dedup.
-- **Per IP, one token bucket** (cost: `put` 6, `cx_check` 12, `cx_send` 1, others 0.5; refill 60/min). HTTP body ≤ 8 KB; ≤ 4 open long polls per IP.
-- **DHT:** tokens = SHA1(secret ‖ ip), rotated every 10 min; routing table ≤ 1000; responders added only after they answer.
-- **Book:** lines ≤ 255 chars; public unicast IPs only (except entries learned on the LAN).
-- **Relaying (each peer, configurable):**
-  - bridges only between two of its own direct peers, for one `sid` each
-  - defaults: browsers ≤ 2 sessions at ≤ 256 kbit/s each; native nodes ≤ 16 sessions at ≤ 2 Mbit/s each
-  - ≤ 1 GB per hour in total; sessions idle for 2 min are closed
-  - frames ≤ 16 KB
-
----
-
-## 10. Files (~1,600 lines)
-
-| File | Job | Lines | Draft? |
-|---|---|---|---|
-| `src/bytes.js` | hex, base64url, z-base32, u64, concat | 45 | ✅ |
-| `src/crypto.js` | WebCrypto: keys from seed, sign/verify, ECDH, HKDF, AES-GCM, hashes | 55 | ✏️ drop ed→x |
-| `src/bencode.js` | bencode (hardened) | 45 | ✅ |
-| `src/record.js` | Beacon, BEP 44 signable, DNS TXT codec (also used by mDNS) | 80 | ✅ |
-| `src/message.js` | sealed-sender seal/open | 60 | ⬜ |
-| `src/dht.js` | sans-IO KRPC node: routing, lookup, get/put, get_peers/announce_peer, query hooks | 200 | ✏️ |
-| `src/book.js` | anchor lines: grep, format, per-service scores, merge, probe queue | 160 | ⬜ |
-| `src/peer.js` | `Peer`: identity, book, HTTP client (retries, long poll, acks), publish/resolve/send | 180 | ✏️ |
-| `src/rtc.js` | `connect`/`accept`: offer/answer/trickle, control channel, fallback to relay | 120 | ✏️ |
-| `src/relay.js` | `via` negotiation, bridging for others, relayed channel (E2E frames, same interface), limits | 150 | ⬜ |
-| `src/anchor.js` | UDP demux, HTTP server, inboxes, `cx_*` handlers, token bucket, replay cache | 220 | ✏️ |
-| `src/home.js` | homepage template | 50 | ⬜ |
-| `src/stun.js` | STUN binding responder (anchors are the STUN servers) | 25 | ⬜ |
-| `src/lan.js` | broadcast/multicast + mDNS responder and query | 100 | ⬜ |
-| `src/node.js` | native wiring: UDP socket, book file, LAN, DNS lookup, promotion, default WebRTC loader | 100 | ⬜ |
-| `bin/corvax.js` | `corvax node \| anchor \| anchors \| id \| resolve` | 50 | ✏️ |
-| `src/demo.html` · `anchors.txt` | two-tab chat demo at `/demo` · baked-in list | 60 | ✏️ |
-| `assets/logo/` | CORVAX logo: `corvax-source.jpg` (original with green screen), `corvax.png` (1024 px, transparent), `corvax-{16…512}.png`, `favicon.ico` (16/32/48), **`corvax-web.png` (96 px, 64-colour palette, 2.9 KB) served at `/logo`** | n/a | ✅ |
-
----
-
-## 11. API (all of it)
+## 12. API (all of it)
 
 ```js
-import { Peer } from 'corvax'                 // browsers: https://<anchor>/cx/index.js · Deno: npm:corvax
+import { Peer } from 'corvax'                     // browsers: https://<anchor>/cx/index.js · Deno: npm:corvax
 
-const me = await Peer.create({
-  seed,                                           // optional; persisted by the caller
-  anchors, sources, dohDomains,                   // optional extra bootstrap inputs
-  RTCPeerConnection,                              // optional: overrides the default (§8)
-  relay: 'fallback',                              // default; or 'never' (direct only)
-  relayFor: true                                  // default; relay for others within limits (§9)
+const me = await Peer.create({ seed, anchors, sources, dohDomains, RTCPeerConnection, relay: 'fallback', relayFor: true })
+me.address
+await me.publish()                                // Beacon (needed to be reachable by key)
+me.accept(({ from, channel, kind }) => {})
+const { channel, kind } = await me.connect(address)
+await me.resolve(address);  await me.send(address, body);  me.on(fn)
+me.anchors();  me.addAnchors(text)
+
+// topics
+const chess = await me.topic('Chess')             // handle; normalizes the name, no network I/O
+await chess.publish()                             // → { stored: n }  lease renewed automatically until unpublish/close
+await chess.unpublish()
+await chess.search()                              // → [{ address, presence: 'recent', expires, seq }]
+const stop = chess.subscribe({                    // watch presence + join the broadcast mesh
+  presence: ({ address, presence, expires }) => {},   // presence: 'recent' | 'expired'
+  message: ({ from, body, topic }) => {}
 })
-me.address                                        // permanent, shareable
-await me.publish()                                // Beacon → DHT, refreshed every 30 min
-me.accept(({ from, channel, kind }) => {})        // incoming channels
-const { channel, kind, via } = await me.connect(address)   // kind: 'direct' | 'peer'
-
-me.anchors()  /  me.addAnchors(text)              // export / import anchor lines
-await me.resolve(address)                         // Beacon fields
-await me.send(address, body);  me.on(fn)          // raw signed + encrypted messages
-me.close()
+await chess.broadcast(body)                       // JSON, ≤ 1024 bytes encoded; requires publish()
+stop()                                            // unsubscribe this listener
+chess.close()                                     // unpublish, stop watching, close topic links, clear timers
+me.close()                                        // closes all topics too
 ```
-CLI: `corvax node` (a peer that promotes itself), `corvax anchor`, `corvax anchors`, `corvax id`, `corvax resolve <addr>`; `--no-relay` opts out of relaying.
+CLI: `corvax node | anchor | anchors | id | resolve <addr>`; `--no-relay`, `--no-storage`.
 
 ---
 
-## 12. Tests
+## 13. Files
+
+| File | Job |
+|---|---|
+| `src/bytes.js`, `bencode.js`, `crypto.js` | encodings, hardened bencode, WebCrypto |
+| `src/record.js`, `message.js` | Beacon (pkarr), sealed messages |
+| `src/topic.js` | **new:** normalization, topic ids, provider records, broadcast frames (encode/sign/verify) |
+| `src/store.js` | **new:** `TopicStore`: validation, leases, tombstones, event log, cursors, coalesced watch |
+| `src/topics.js` | **new:** peer side: handles, publish/renew/unpublish, search, multiplexed watch, neighbours, broadcast |
+| `src/dht.js`, `book.js` | DHT; anchor book (+ `storage` flag) |
+| `src/peer.js`, `rtc.js`, `relay.js` | Peer API; connections (+ `topic` purpose, `busy`); relaying |
+| `src/anchor.js`, `node.js`, `stun.js`, `lan.js`, `home.js` | anchor services (+ `cx_tpub`/`cx_tfind`/`cx_twatch`); native wiring; STUN; LAN; homepage |
+| `bin/corvax.js`, `src/demo.html`, `src/anchors.js`, `assets/logo/` | CLI, demo, built-in anchors, logo |
+
+---
+
+## 14. Implementation order (topics)
+
+1. `topic.js`: normalization, ids, records, frames, with signature checks → unit tests
+2. `store.js` + `cx_tpub`/`cx_tfind`/`cx_twatch` handlers + `st` in `cx_hi` + book `storage` flag → store tests
+3. `topics.js` publish/renew (batched, jitter, skew, fallback nodes)/unpublish/search → integration tests against 6 storage nodes
+4. Multiplexed watch, coalescing, snapshot resync, local expiry → watch tests
+5. `p: 'topic'` connections (`busy`, reservations), neighbour selection, broadcast send/verify/forward/rate/dedup → mesh and adversarial tests
+6. API integration and `close()` cleanup → resource tests; browser test
+7. `SPEC.md`, README, demo, plan status
+
+---
+
+## 15. Tests
 
 | Test | Proves |
 |---|---|
-| `core` | encodings round-trip; truncated bencode can't hang; seed → same keys everywhere; Beacon tamper; message tamper, **reflection**, redirection (`to`) and replay rejected; anchor lines grepped from messy text; score maths |
-| `dht` | 20 loopback nodes: put/get, stale seq + bad signature rejected, announce_peer → get_peers |
-| `book` | 10 anchors, each knowing one neighbour, converge to all 10; a wrong-key line is never verified; an anchor with HTTP up but UDP dead scores well for browsers only; a dead anchor decays |
-| `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves and sends, A's long poll receives; retried POST not executed twice; `after` acks delete; newer poll ends the older one; `cx_check` turns on only reachable services; token bucket |
-| `home` | `GET /logo` and `/favicon.ico` return the image with a long cache header; `GET /` ≤ 10 KB, no `<script>`, no external URLs, escapes a hostile line, `addAnchors(page)` recovers every listed anchor |
-| `core` (wire names) | the wire names in `SPEC.md` (`cx_*`, `corvax-anchor:`, `_cx`, `CX?`, `_corvax._udp`, `cx/…` labels) match the code |
-| `relay` | with direct ICE blocked between A and B (test hook): connect via a third **browser**, via a **Node** peer and via an **anchor**; C sees only ciphertext (frames not decryptable with C's keys); a forged `bridge` for a sid C wasn't asked by both sides is ignored; limits enforced; `relay: 'never'` gives `'ice-failed'` |
-| `lan` | broadcast and mDNS discovery between two nodes |
-| `browser` | Playwright **Chromium, Firefox, WebKit**: two pages bootstrap from an anchor homepage, connect direct (`kind: 'direct'`), then with direct blocked through a third page (`kind: 'peer'`) |
-| `native` | Node ↔ Chromium and Node ↔ Node with **werift** and with **node-datachannel**; Bun and Deno run `core`, `anchor` and Node ↔ Node with werift |
-| `live` (manual) | Beacon via `relay.pkarr.org`; TXT via public DoH; `announce_peer` on real Mainline |
+| `core` | encodings; keys from seed; Beacon and message tamper/reflection/redirection/replay; anchor-line grep; scores |
+| `dht` | 20 nodes: BEP 44 put/get, stale seq, bad signature, announce_peer/get_peers |
+| `anchor` | 3 anchors promote; publish/resolve/message; idempotent retries; acks; long-poll replacement; rate limit; homepage HTML vs plain text; logo |
+| `lan` | broadcast and mDNS discovery |
+| `native` | Node ↔ Node with werift and node-datachannel |
+| `relay` | relaying through an anchor; ciphertext only; forged bridge; limits; `relay: 'never'` |
+| `browser` | Chromium: direct, through a third browser, Node ↔ browser; **browser publishes a topic, a Node peer finds it and broadcasts to it** |
+| `topic` (unit) | normalization; id stability; record and frame tamper; wrong-topic record; oversize |
+| `store` (unit, fake clock) | ok/dup/stale/bad/expired/future; tombstone blocks replay; expiry and sweep; limits; find returns only live; watch: snapshot without cursor, delta with cursor, coalescing window, epoch change and trimmed log → snapshot, timeout, abort |
+| `topics` (integration, 6 storage nodes, Node peers) | replication to exactly the 5 closest; search finds providers; renewal keeps a provider recent past one lease; offline provider expires; unpublish → `expired` event; storage node killed → search still works and renewal re-replicates; clock skew corrected; cursor loss → snapshot; one long poll per node for many topics; `close()` leaves no timers or polls |
+| `broadcast` (unit with fake links + integration mesh) | delivery across a 5-peer mesh, exactly once per peer; loops suppressed; hop limit; forward fan-out ≤ 3; rate limit; oversize; old, future-dated and replayed frames; forged signature; sender without a live record; record for another topic |
+| `live` (manual) | pkarr relay; public DoH |
 
 ---
 
-## 13. Build order
+## 16. Decisions (and why)
 
-1. `crypto` (seed → keys), `message`, `dht` hooks + get_peers/announce_peer → `core`, `dht`
-2. `book` + `cx_hi`/`cx_anchors` → `book`
-3. `anchor` (HTTP `/krpc`, long poll, acks, replay cache, inboxes) + `peer` HTTP client + `home` → `anchor`, `home`
-4. `rtc` (standard offer/answer, control channel) + `stun` → `browser` direct
-5. `relay` → `relay`, `browser` relayed
-6. `node` (default WebRTC loader, promotion, DNS, cache) + `lan` → `native`, `lan`
-7. CLI, demo, `anchors.txt`, `live` run, README + `SPEC.md`. **Done.**
-
----
-
-## 14. Decisions taken in review (and why)
-
-**Naming (wire level, frozen with `cx/1`):** queries `cx_*` · anchor lines `corvax-anchor:` · Beacon TXT name `_cx` · key-derivation labels `cx/…` · signed strings `cx-hi`, `cx-listen:` · LAN probe `CX?` · mDNS `_corvax._udp.local` · DNS bootstrap `_corvax-anchors.<domain>` · Mainline infohash `SHA1("corvax anchors v1")` · library path `/cx/*.js` · control DataChannel label `cx`.
-
-
-| Change | Why |
+| Decision | Why |
 |---|---|
-| **Separate X25519 key** (from the same seed) instead of converting Ed25519 → X25519 | Uses only standard WebCrypto operations. The key is published in the Beacon, which we always resolve anyway. |
-| **Sealed-sender messages:** ephemeral ECDH + Ed25519 signature over `to` | The old shared static key couldn't prove who sent a message and allowed reflecting a message back to its sender. Now sender attribution is explicit and keys are never reused across directions. |
-| **Full SDP offer/answer**, no templates | Robust across Chrome, Firefox, Safari and native libraries. Costs ~1 KB per connection, so the message cap goes up to 4 KB. |
-| **Relaying through any peer is the default fallback** (`relay: 'fallback'`) | Connections should succeed whenever any path exists. Relaying is not a server role: browsers, native nodes and anchors all relay the same way. |
-| **No TURN** | Peer bridging over two ordinary DataChannels covers everything TURN did (anchors are reachable by everyone) and removes ~300 lines of TURN server, credentials and its abuse surface. Only a 25-line STUN responder remains. |
-| **Relayed channels are end-to-end encrypted with keys bound to both identities** | The relaying peer sees only sizes and timing, never content, and can't swap keys. |
-| **Mainline `get_peers` is one bootstrap source, not "the directory"** | Its results can be stale or hostile. The verified anchor book is the foundation. |
-| **Separate identity and per-service reachability** in the book | A working HTTPS tunnel must not make a dead UDP/DHT port look healthy. |
-| **Idempotent HTTP:** retry cache, message ids, acked long polls, `text/plain` POST | Retries never execute twice, nothing is silently lost, and browsers send no CORS preflight. |
-| **Default native WebRTC = `werift`** (optional dependency), injectable | Pure JS on Node, Bun and Deno; replaceable without API changes. |
-| **No hard line limit** | Safety and tests matter more than the line count. |
-
-
----
-
-## 15. Implementation notes (what was built, and deviations from the plan above)
-
-| Area | As built |
-|---|---|
-| Code | ~1,800 lines in `src/` (+ 46 CLI), ~500 lines of tests. Zero runtime dependencies; `werift` is the optional default WebRTC for native runtimes |
-| HTTP `get`/`put`/`get_peers` | **Recursive** over HTTP: the anchor does the DHT work for the client (over UDP they are plain BEP 44/5) |
-| `cx_check` → `cx_probe` | `cx_check` asks a *different* anchor to probe the caller with the anchor-to-anchor query `cx_probe` (only answered for verified anchors), or probes itself when it knows no other anchor |
-| Beacon `c=` | Holds full **anchor lines**, not URLs, so a sender picks the right way in (`web=` from HTTPS pages, `ip:port` otherwise) |
-| `kind` | `'direct' \| 'peer'`. With no TURN there is no relayed ICE pair to detect, so `getStats()` is not needed and was dropped from the WebRTC contract |
-| Rate limits | Configurable per node. Defaults: burst 120, 4 per second, ≤ 64 open long polls per IP. The first draft's 4 polls per IP broke when several peers shared one IP (carrier-grade NAT, offices, and the test suite) |
-| Long polls | The anchor watches the *response* `close` event to notice a vanished client (the request's `close` event fires as soon as the body has been read) |
-| LAN | Port 4798 (so several nodes on one host can all listen with `SO_REUSEADDR`); mDNS on 5353 |
-| Exit | `Peer.close()` / `node.close()` release every handle, so an app exits cleanly (verified with `werift`). `node-datachannel` needs its own cleanup, so the test runner uses `--test-force-exit` |
-
-### Verified
-- **Node 22:** all 18 tests.
-- **Bun 1.4.4 and Deno 2.9.6:** anchors, messaging, a direct and a relayed DataChannel.
-- **Chromium 153:** direct; relayed through a third browser; Node (`werift`) ↔ browser.
-- **Live:** `relay.pkarr.org` accepted our record and returned it identical; DNS TXT reads through public DoH.
-
-### Still open (needs an environment this sandbox doesn't have)
-- Firefox and WebKit runs (CI, `.github/workflows/test.yml`, triggered by hand to keep Actions usage low).
-- Two browsers on two real networks.
-- Joining the live Mainline DHT (outbound UDP is blocked here).
-- Real Safari.
+| Separate X25519 key; sealed-sender signed messages | Standard WebCrypto only; sender attribution, no reflection |
+| Full SDP offer/answer | Robust across browsers and native libraries |
+| Relay through any peer by default; no TURN | Connections succeed whenever any path exists; no relay servers |
+| HTTP POST + long polls, no WebSocket | One client transport for every runtime |
+| **Topics use CORVAX provider records on storage nodes, not BEP 5** | BEP 5 announces IP:port without identity, signatures or expiry control, and spams the public DHT with private data. Our records are signed, leased and revocable |
+| **Publisher-driven replication to the 5 XOR-closest storage nodes** | No storage-to-storage protocol. Books differ slightly between peers, so searchers query 8 to absorb that |
+| **Absolute `exp` + tombstones + skew estimate** | A replayed old record can't revive a provider. Clock offsets are corrected from storage `now` instead of being trusted |
+| **Presence is only `recent` / `expired`** | A lease proves a recent publication, not that the peer is online |
+| **Eligibility = the sender's own live provider record inside the frame** | Receivers verify membership without any lookup or central list |
+| **One link per (peer, topic)** | Keeps the accept rule and the limits trivial; at most 16 links |
+| **Broadcast is best-effort only** | Durable or ordered delivery would need storage and history, which are out of scope |
+| v1 stays v1 | No version bump; `cx/1` grows by adding queries and fields |
