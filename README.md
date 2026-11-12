@@ -45,7 +45,7 @@ npx corvax anchor --public-host <ip>     # the first anchors of a network
 npx corvax anchors                       # print the anchor book
 ```
 
-Every node reachable over HTTP serves a small homepage at `/`. It explains what the node is, shows how to use it, and lists known anchors; the page is itself a valid anchor source. The node also serves the library at `/cx/*.js`, the logo at `/logo` and a demo at `/demo`.
+Every node reachable over HTTP serves `/` in two forms. Browsers get a small homepage that explains what the node is, shows how to use it, and lists known anchors. Everything else (`curl`, `wget`, scripts) gets the plain anchor list, one line each: `curl -s http://<node>:4799/`. The node also serves the library at `/cx/*.js`, the logo at `/logo` and a demo at `/demo`.
 
 **Browsers on HTTPS pages** need an anchor with an HTTPS origin. Put one in front of a node with any TLS proxy, or for free with `cloudflared tunnel --url http://localhost:4799`, then start the node with `--web https://<that origin>`. The tunnel carries HTTP only; UDP (DHT, STUN) still needs the port.
 
@@ -61,7 +61,7 @@ bun test/runtime-smoke.js                 # Bun
 deno run -A test/runtime-smoke.js         # Deno
 node test/live/pkarr.js                   # needs internet: round-trip through the public pkarr relay (Mainline)
 ```
-CI runs the browser tests in Chromium, Firefox and WebKit every night.
+CI runs one job when code changes: Node (with Chromium), Bun and Deno. Firefox and WebKit run when triggered by hand (Actions → test → Run workflow).
 
 ## Documents
 - [SPEC.md](SPEC.md): the wire protocol `cx/1`, complete enough to write another implementation

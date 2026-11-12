@@ -81,6 +81,11 @@ Every transport carries the same bencoded KRPC dictionaries: `{t, y:"q", q, a}`,
 - `get`, `put` and `get_peers` are **recursive**: the anchor does the DHT work and answers with the result. `put` needs no token over HTTP.
 - A repeated transaction id `t` from the same IP within 60 s gets the cached reply. This makes retries idempotent.
 
+`GET /` on any HTTP-reachable node:
+- When the `Accept` header contains `text/html`, the response is the homepage (HTML, which also contains the anchor lines verbatim).
+- Otherwise it is `text/plain`: the node's own anchor line first (if it is an anchor), then its shared view, one line each.
+- Responses carry `Vary: Accept`. This is the simplest way for any client to fetch an anchor list.
+
 Error codes: 201 generic · 202 rate limited · 203 protocol · 204 unknown method · 206 bad signature · 302 stale seq.
 
 ---

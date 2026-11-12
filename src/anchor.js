@@ -64,7 +64,7 @@ export function installHandlers (node) {
   }
   h.cx_anchors = async (a, from) => {
     if (a.me instanceof Uint8Array && a.me.length <= 255) node.book.add(str(a.me))
-    return { a: [node.line(), node.book.shared()].filter(Boolean).join('\n') }
+    return { a: node.listing() }
   }
   // "Can strangers reach me?" The check is done by a different anchor when we know one.
   h.cx_check = async (a, from) => {
@@ -186,9 +186,14 @@ export function httpServer (node) {
       if (req.method === 'POST' && path === '/krpc') { res.setHeader('content-type', 'text/plain'); return await krpc(req, res, ip, port) }
       if (req.method !== 'GET') { res.statusCode = 405; return res.end() }
       if (path === '/') {
+        res.setHeader('vary', 'accept')
+        if (!/text\/html/.test(req.headers.accept || '')) {             // curl, wget, scripts, fetch(): plain anchor lines
+          res.setHeader('content-type', 'text/plain; charset=utf-8')
+          return res.end(node.listing() + '\n')
+        }
         res.setHeader('content-type', 'text/html; charset=utf-8')
         const origin = node.web || `http://${String(req.headers.host || `${node.host}:${node.port}`).replace(/[^\w.:[\]-]/g, '')}`
-        return res.end(homepage({ origin, line: node.line() || `(not an anchor) ${node.key}`, anchor: !!node.line(), services: node.services(), uptime: Date.now() - node.started, anchors: node.book.shared() }))
+        return res.end(homepage({ origin, line: node.line() || `(not an anchor) ${node.key}`, anchor: !!node.line(), services: node.services(), uptime: Date.now() - node.started, anchors: node.listing() }))
       }
       if (path === '/logo') return send(res, new URL('corvax-web.png', logoDir), 'image/png', true)
       if (path === '/favicon.ico') return send(res, new URL('favicon.ico', logoDir), 'image/x-icon', true)

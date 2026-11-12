@@ -121,7 +121,7 @@ Every node reachable over HTTP serves a thin page, so anyone who stumbles on it 
 3. **How to use it:**
    - browser: `import { Peer } from '<origin>/cx/index.js'`
    - native: `npx corvax node`
-   - shell: `curl -s <origin> | grep -o 'corvax-anchor:[^ <]*'`
+   - shell: `curl -s <origin>` (plain anchor lines; see below)
    - plus links to `/demo` and the repo
 4. **Known anchors:** the shared view, one anchor line per row with its score, in a `<pre>`
 
@@ -130,6 +130,7 @@ Rules:
 - ≤ 10 KB, system font, dark and light mode, readable on a phone
 - every dynamic value HTML-escaped
 - **it is the anchor list:** there's no `/anchors.txt` endpoint, and machines use `cx_anchors`.
+- **Content negotiation on `GET /`:** clients whose `Accept` header includes `text/html` (browsers) get the page. Everything else (`curl`, `wget`, scripts, `fetch()`) gets `text/plain`: the node's own line first, then its shared view, one anchor line per line, with `Vary: Accept`. The HTML page contains the same lines verbatim, so grepping it works too.
 
 ---
 
@@ -362,7 +363,7 @@ CLI: `corvax node` (a peer that promotes itself), `corvax anchor`, `corvax ancho
 - **Live:** `relay.pkarr.org` accepted our record and returned it identical; DNS TXT reads through public DoH.
 
 ### Still open (needs an environment this sandbox doesn't have)
-- Firefox and WebKit runs (CI, `.github/workflows/test.yml`).
+- Firefox and WebKit runs (CI, `.github/workflows/test.yml`, triggered by hand to keep Actions usage low).
 - Two browsers on two real networks.
 - Joining the live Mainline DHT (outbound UDP is blocked here).
 - Real Safari.

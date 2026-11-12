@@ -46,7 +46,7 @@ a{color:inherit}
 const me = await Peer.create()
 const { channel } = await me.connect('&lt;address&gt;')</pre>
 <p>Run a node (it becomes an anchor if it is reachable): <code>npx corvax node</code></p>
-<p>Get the anchor list: <code>curl -s ${esc(origin)} | grep -o 'corvax-anchor:[^ &lt;]*'</code></p>
+<p>Get the anchor list as plain text: <code>curl -s ${esc(origin)}</code> (any client that doesn't ask for HTML gets one anchor line per line)</p>
 <p><a href="/demo">Try the demo</a> · <a href="https://github.com/sloev/corvax">Source and spec</a></p>
 
 <h2>Known anchors</h2>

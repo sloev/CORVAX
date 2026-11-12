@@ -1,35 +1,40 @@
+# One small job, only when code changes. Firefox and WebKit run only when triggered by hand.
 name: test
 on:
   push:
+    branches: [main]
+    paths: ['src/**', 'test/**', 'bin/**', 'package*.json', '.github/workflows/**']
   pull_request:
-  schedule:
-    - cron: '17 4 * * *'          # nightly: catches browser and runtime updates early
+    paths: ['src/**', 'test/**', 'bin/**', 'package*.json', '.github/workflows/**']
+  workflow_dispatch:
+    inputs:
+      browsers:
+        description: 'Browsers to test'
+        default: 'chromium,firefox,webkit'
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  node:
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - run: npm ci
-      - run: npm i --no-save playwright && npx playwright install --with-deps chromium firefox webkit
-      - run: npm test
-        env: { BROWSERS: 'chromium,firefox,webkit' }
-
-  bun:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+        with: { node-version: 22, cache: npm }
       - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bun test/runtime-smoke.js
-
-  deno:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v2
         with: { deno-version: v2.x }
-      - run: deno install
-      - run: deno run -A test/runtime-smoke.js
+      - run: npm ci
+      - name: Browsers
+        env: { BROWSERS: "${{ inputs.browsers || 'chromium' }}" }
+        run: npm i --no-save playwright && npx playwright install --with-deps ${BROWSERS//,/ }
+      - name: Node (incl. browsers)
+        env: { BROWSERS: "${{ inputs.browsers || 'chromium' }}" }
+        run: npm test
+      - name: Bun
+        run: bun test/runtime-smoke.js
+      - name: Deno
+        run: deno run -A test/runtime-smoke.js

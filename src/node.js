@@ -40,6 +40,11 @@ export class CorvaxNode {
   }
 
   line () { return this.isAnchor ? formatLine({ key: this.key, host: this.publicHost, port: this.port, web: this.web }) : null }
+  // What this node tells everyone: its own line first, then its shared view of the book (without itself).
+  listing () {
+    const own = this.line(), rest = this.book.shared().split('\n').filter(l => l && !l.startsWith(`corvax-anchor:${this.key}@`))
+    return [own, ...rest].filter(Boolean).join('\n')
+  }
   services () { return this.isAnchor ? ['udp', 'http', ...(this.peer?.RTC && this.peer.relayFor ? ['relay'] : [])] : ['http (local)'] }
 
   async start () {
@@ -67,7 +72,7 @@ export class CorvaxNode {
     await new Promise((resolve, reject) => { this.http.once('error', reject); this.http.listen(this.port, this.host, resolve) })
 
     if (o.lan) {
-      this.lan = await startLan({ port: o.lanPort, mdns: o.mdns, lines: () => [this.line(), this.book.shared()].filter(Boolean).join('\n'), onFound: t => this.book.add(t, { lan: true }) }).catch(() => null)
+      this.lan = await startLan({ port: o.lanPort, mdns: o.mdns, lines: () => this.listing(), onFound: t => this.book.add(t, { lan: true }) }).catch(() => null)
     }
     if (o.mainline) this.dht.bootstrap(MAINLINE).then(n => log(`mainline: ${n} nodes`)).catch(() => {})
 
