@@ -49,7 +49,7 @@ export async function anchor ({ port = 4799, host = '0.0.0.0', bootstrap = [], m
   const ops = {
     async hello (m, ws) {   // proves the client owns the key whose Letters it wants to receive
       const pub = unb64(m.pub)
-      if (Math.abs(Date.now() - m.ts) > 300e3 || !await verify(pub, unb64(m.sig), utf8(`rv-hello:${m.ts}`))) throw new Error('bad hello')
+      if (Math.abs(Date.now() - m.ts) > 300e3 || !await verify(pub, unb64(m.sig), utf8(`cx-hello:${m.ts}`))) throw new Error('bad hello')
       const id = hex(pub)
       if (!inboxes.has(id)) inboxes.set(id, new Set())
       inboxes.get(id).add(ws); ws.inbox = id
@@ -70,7 +70,7 @@ export async function anchor ({ port = 4799, host = '0.0.0.0', bootstrap = [], m
       if (path === '/logo') return asset(res, 'corvax-web.png', 'image/png')
       if (path === '/favicon.ico') return asset(res, 'favicon.ico', 'image/x-icon')
       if (path === '/') return file(res, 'demo.html', 'text/html')
-      if (/^\/rv\/[a-z]+\.js$/.test(path)) return file(res, path.slice(4), 'text/javascript')
+      if (/^\/cx\/[a-z]+\.js$/.test(path)) return file(res, path.slice(4), 'text/javascript')
       const addr = path.slice(1)
       if (/^[a-z0-9]{52}$/.test(addr)) {                                     // pkarr relay API
         const pub = unz32(addr)

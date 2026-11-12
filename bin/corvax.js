@@ -16,8 +16,8 @@ for (let i = 0; i < rest.length; i++) {
   if (rest[i].startsWith('--')) flags[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i]
   else args.push(rest[i])
 }
-const anchors = String(flags.anchor || process.env.RV_ANCHOR || 'ws://localhost:4799').split(',')
-const seedFile = process.env.RV_SEED_FILE || join(homedir(), '.config', 'corvax', 'seed')
+const anchors = String(flags.anchor || process.env.CORVAX_ANCHOR || 'ws://localhost:4799').split(',')
+const seedFile = process.env.CORVAX_SEED_FILE || join(homedir(), '.config', 'corvax', 'seed')
 
 async function me () {
   let seed

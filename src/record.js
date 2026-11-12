@@ -1,6 +1,6 @@
 // The Beacon: a pkarr-compatible signed DNS packet (BEP 44 mutable item, keyed by the Ed25519 key).
 // Wire format (same as pkarr relays): sig(64) | seq(8, big-endian microseconds) | DNS packet (<= 1000 bytes)
-// Content: TXT records "_rv" = "key=value", e.g. c=wss://anchor.example (where to deliver Letters).
+// Content: TXT records "_cx" = "key=value", e.g. c=wss://anchor.example (where to deliver Letters).
 import { utf8, str, concat, u64, readU64 } from './bytes.js'
 import { encode } from './bencode.js'
 import { sign, verify, sha1 } from './crypto.js'
@@ -28,8 +28,8 @@ export function fields (r) {
   return out
 }
 
-// Minimal DNS packet: a response holding TXT records named "_rv".
-const NAME = concat(Uint8Array.of(3), utf8('_rv'), Uint8Array.of(0))
+// Minimal DNS packet: a response holding TXT records named "_cx".
+const NAME = concat(Uint8Array.of(3), utf8('_cx'), Uint8Array.of(0))
 function dnsEncode (txts) {
   const rrs = txts.map(t => {
     const s = utf8(t)

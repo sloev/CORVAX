@@ -62,7 +62,7 @@ export class Peer {
     let k = this.keys.get(hex(pub))
     if (!k) {
       const sh = await shared(this.kp, pub)
-      this.keys.set(hex(pub), k = { sh, aes: await aesKey(await derive(sh, 'rv/letter')) })
+      this.keys.set(hex(pub), k = { sh, aes: await aesKey(await derive(sh, 'cx/letter')) })
     }
     return k
   }
@@ -109,7 +109,7 @@ export class Peer {
           wait = 500
           if (home) {
             const ts = Date.now()
-            ws.send(JSON.stringify({ op: 'hello', pub: b64(this.kp.pub), ts, sig: b64(await sign(this.kp, utf8(`rv-hello:${ts}`))) }))
+            ws.send(JSON.stringify({ op: 'hello', pub: b64(this.kp.pub), ts, sig: b64(await sign(this.kp, utf8(`cx-hello:${ts}`))) }))
           }
           resolve()
         }

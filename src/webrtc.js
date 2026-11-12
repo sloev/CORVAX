@@ -16,7 +16,7 @@ const munge = (sdp, { ufrag, pwd }) => sdp
 const fingerprint = sdp => sdp.match(/a=fingerprint:(.*)\r\n/)[1]
 
 async function creds (peer, address, sid, role) {
-  const b = await derive((await peer.key(unz32(address))).sh, `rv/ice/${sid}/${role}`, 20)
+  const b = await derive((await peer.key(unz32(address))).sh, `cx/ice/${sid}/${role}`, 20)
   return { ufrag: hex(b.slice(0, 4)), pwd: hex(b.slice(4)) }
 }
 
@@ -35,7 +35,7 @@ const flush = s => { for (const c of s.queue.splice(0)) s.pc.addIceCandidate({ c
 function start (peer, address, sid, opts) {
   const s = entry(sid)
   s.pc = new RTCPeerConnection({ iceServers: opts.iceServers || [] })
-  const channel = s.pc.createDataChannel('rv', { negotiated: true, id: 0 })
+  const channel = s.pc.createDataChannel('cx', { negotiated: true, id: 0 })
   s.pc.onicecandidate = e => e.candidate?.candidate && peer.send(address, { t: 'rtc-c', sid, c: e.candidate.candidate }, opts.beacon)
   s.open = new Promise((resolve, reject) => {
     channel.onopen = () => resolve(channel)

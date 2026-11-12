@@ -35,7 +35,7 @@ CORVAX does five things and then gets out of the way:
 ## 2. Built to last
 
 - **Standard foundations:** BitTorrent KRPC (BEP 5, 43, 44), pkarr records, DNS TXT, HTTP/1.1, STUN (RFC 5389, binding only), mDNS, and the W3C WebRTC and WebCrypto APIs.
-- **Our own protocol on top, versioned as `rv/1`:** the `rv_*` queries, anchor lines, the message format, the anchor book rules and the connect flow. These are specified in `SPEC.md` with test vectors. The protocol only grows: fields and queries never change meaning, new ones get new names, and unknown fields are ignored.
+- **Our own protocol on top, versioned as `cx/1`:** the `cx_*` queries, anchor lines, the message format, the anchor book rules and the connect flow. These are specified in `SPEC.md` with test vectors. The protocol only grows: fields and queries never change meaning, new ones get new names, and unknown fields are ignored.
 - **Core has zero runtime dependencies and no build step.** Plain ESM JavaScript; the browser loads the same files Node runs. Native runtimes get one *optional* default WebRTC library (§8).
 - **Standard crypto only:** WebCrypto Ed25519, X25519, HKDF-SHA256, AES-GCM, SHA-1/256. No custom key conversions.
 - **Small but not at the expense of safety.** Target is roughly 1,600 lines; correctness and tests come first.
@@ -49,7 +49,7 @@ CORVAX does five things and then gets out of the way:
           UDP (KRPC · STUN)                            HTTP POST /krpc
  Mainline ◄───────────────► ANCHOR ◄──────────────────────────────── any client
  DHT nodes                     ▲ ▲                                   (browser, Node, Bun, Deno, curl)
-                     UDP KRPC  │ │ LAN: broadcast "RV?" + mDNS
+                     UDP KRPC  │ │ LAN: broadcast "CX?" + mDNS
                       ANCHOR ◄─┘ └─► native nodes on the same network
 
  PEER A ◄═════════════════════ RTCDataChannel (direct) ═════════════════════► PEER B
@@ -75,15 +75,15 @@ CORVAX does five things and then gets out of the way:
 
 ```
 Seed       32 random bytes (the only secret to back up)
-Identity   Ed25519 key  = from HKDF(seed, "rv/ed25519")    → address = z32(ed_pk), 52 chars
-Encryption X25519 key   = from HKDF(seed, "rv/x25519")     → published in the Beacon, signed by the identity key
-Anchor     rv-anchor:<z32>@<ip>:<port>[;web=<https origin>][;q=<0-100>]                 ≤ 255 chars
-Beacon     pkarr signed packet (BEP 44 mutable item at SHA1(ed_pk)), ≤ 1000 B, TXT "_rv":
+Identity   Ed25519 key  = from HKDF(seed, "cx/ed25519")    → address = z32(ed_pk), 52 chars
+Encryption X25519 key   = from HKDF(seed, "cx/x25519")     → published in the Beacon, signed by the identity key
+Anchor     corvax-anchor:<z32>@<ip>:<port>[;web=<https origin>][;q=<0-100>]                 ≤ 255 chars
+Beacon     pkarr signed packet (BEP 44 mutable item at SHA1(ed_pk)), ≤ 1000 B, TXT "_cx":
            x=<b64 x25519_pk>   c=<inbox anchor url> (1..n)   [app-defined k=v]
 Message    eph_x 32 | iv 12 | AES-GCM_K( inner ) | tag 16                                ≤ 4 KB
-           K     = HKDF-SHA256( X25519(eph_sk, recipient_x), info = "rv/msg" ‖ eph_x ‖ recipient_x )
+           K     = HKDF-SHA256( X25519(eph_sk, recipient_x), info = "cx/msg" ‖ eph_x ‖ recipient_x )
            inner = bencode{ from: ed_pk, to: recipient_ed_pk, id: 16 B, ts, body } ‖ Ed25519 sig over all of it
-Relay      frame = counter 8 | AES-GCM_Kdir(data) | tag 16;  Kdir = HKDF(X25519(eph_a, eph_b), "rv/relay" ‖ sid ‖ direction)
+Relay      frame = counter 8 | AES-GCM_Kdir(data) | tag 16;  Kdir = HKDF(X25519(eph_a, eph_b), "cx/relay" ‖ sid ‖ direction)
 ```
 - **Sealed sender:** each message uses a fresh ephemeral X25519 key, so a recipient's long-term key alone can't decrypt past messages, and keys are never reused across directions.
 - **Sender attribution comes from the Ed25519 signature,** not from the shared key. The signature covers `to`, which stops reflection and redirection attacks.
@@ -91,25 +91,25 @@ Relay      frame = counter 8 | AES-GCM_Kdir(data) | tag 16;  Kdir = HKDF(X25519(
 
 ---
 
-## 5. Protocol `rv/1` (KRPC)
+## 5. Protocol `cx/1` (KRPC)
 
 | Query | Source | Request → Reply |
 |---|---|---|
 | `ping`, `find_node` | BEP 5 | routing |
-| `get_peers`, `announce_peer` | BEP 5 | anchors announce on infohash `SHA1("rendezvous anchors v1")`. **One opportunistic bootstrap source**, not an authority: results can be stale or hostile and are verified like any other line |
+| `get_peers`, `announce_peer` | BEP 5 | anchors announce on infohash `SHA1("corvax anchors v1")`. **One opportunistic bootstrap source**, not an authority: results can be stale or hostile and are verified like any other line |
 | `get`, `put` | BEP 44 | resolve / publish a Beacon (signature, seq and token checked) |
-| `rv_hi {n}` | ours | → `{k, sig=Ed25519("rv-hi" ‖ n), web?}`: proves the anchor holds its key (identity only, says nothing about reachability) |
-| `rv_anchors {}` | ours | → `{a}`: best 32 + 8 random anchor lines |
-| `rv_check {port}` | ours | the anchor asks a *different* anchor to probe the caller's UDP and HTTP → `{udp, http}` |
-| `rv_send {to, msg}` | ours | → `{queued}`: stored for that address (2 min, ≤ 64 per address, dedup by message `id`, so retries are idempotent). *Queued ≠ delivered*; delivery is only known when the peer answers |
-| `rv_listen {k, ts, sig, after?}` | ours | **long poll**, waits ≤ 25 s → `{msgs: [{seq, msg}]}`. `after` acknowledges everything up to that `seq`, which the anchor then deletes (at-least-once delivery; receivers dedup by `id`). A newer poll for the same key ends the older one with an empty reply |
+| `cx_hi {n}` | ours | → `{k, sig=Ed25519("cx-hi" ‖ n), web?}`: proves the anchor holds its key (identity only, says nothing about reachability) |
+| `cx_anchors {}` | ours | → `{a}`: best 32 + 8 random anchor lines |
+| `cx_check {port}` | ours | the anchor asks a *different* anchor to probe the caller's UDP and HTTP → `{udp, http}` |
+| `cx_send {to, msg}` | ours | → `{queued}`: stored for that address (2 min, ≤ 64 per address, dedup by message `id`, so retries are idempotent). *Queued ≠ delivered*; delivery is only known when the peer answers |
+| `cx_listen {k, ts, sig, after?}` | ours | **long poll**, waits ≤ 25 s → `{msgs: [{seq, msg}]}`. `after` acknowledges everything up to that `seq`, which the anchor then deletes (at-least-once delivery; receivers dedup by `id`). A newer poll for the same key ends the older one with an empty reply |
 
 **HTTP details:**
 - **Requests:** `POST /krpc` with `Content-Type: text/plain` (a CORS "simple request", so browsers send no preflight). `OPTIONS` is still answered. Body ≤ 8 KB.
 - **Every reply is a KRPC reply**, including errors.
 - **Clients retry** with backoff, and the same `t` (transaction id) is answered from a short replay cache, so a retried `POST` never executes twice.
 
-**Anchor HTTP endpoints:** `GET /` (homepage = anchor list) · `POST /krpc` · `GET /rv/*.js` (the library) · `GET /logo` (the lightweight logo, long cache) · `GET /favicon.ico` · `GET /demo`. CORS `*` everywhere.
+**Anchor HTTP endpoints:** `GET /` (homepage = anchor list) · `POST /krpc` · `GET /cx/*.js` (the library) · `GET /logo` (the lightweight logo, long cache) · `GET /favicon.ico` · `GET /demo`. CORS `*` everywhere.
 
 ### The homepage (`GET /`)
 Every node reachable over HTTP serves a thin page, so anyone who stumbles on it learns what it is and how to join.
@@ -117,9 +117,9 @@ Every node reachable over HTTP serves a thin page, so anyone who stumbles on it 
 1. **What this is:** two sentences ("A CORVAX anchor: it helps peers find each other by key and open direct WebRTC connections. It stores nothing but signed address records and short-lived encrypted messages.")
 2. **This node:** its anchor line, which services it offers (UDP/HTTP/relay), and its uptime
 3. **How to use it:**
-   - browser: `import { Peer } from '<origin>/rv/index.js'`
+   - browser: `import { Peer } from '<origin>/cx/index.js'`
    - native: `npx corvax node`
-   - shell: `curl -s <origin> | grep -o 'rv-anchor:[^ <]*'`
+   - shell: `curl -s <origin> | grep -o 'corvax-anchor:[^ <]*'`
    - plus links to `/demo` and the repo
 4. **Known anchors:** the shared view, one anchor line per row with its score, in a `<pre>`
 
@@ -127,24 +127,24 @@ Rules:
 - server-rendered from one template string, **no JavaScript, no external requests** (the only extra request is the same-origin `/logo`: 96 px, 2.9 KB, shown at 48 px, cached for a year)
 - ≤ 10 KB, system font, dark and light mode, readable on a phone
 - every dynamic value HTML-escaped
-- **it is the anchor list:** there's no `/anchors.txt` endpoint, and machines use `rv_anchors`.
+- **it is the anchor list:** there's no `/anchors.txt` endpoint, and machines use `cx_anchors`.
 
 ---
 
 ## 6. The anchor book
 
-**Line:** `rv-anchor:<z32>@203.0.113.7:4799;web=https://a.example.org;q=93`. Readers grep any text for `rv-anchor:[^\s"'<]+`. Web pages, READMEs, gists, DNS TXT records, invite links and pasted text all work as sources with no extra code.
+**Line:** `corvax-anchor:<z32>@203.0.113.7:4799;web=https://a.example.org;q=93`. Readers grep any text for `corvax-anchor:[^\s"'<]+`. Web pages, READMEs, gists, DNS TXT records, invite links and pasted text all work as sources with no extra code.
 
 **Each entry tracks every service separately**, so a working HTTPS tunnel can't make a dead DHT port look healthy:
 ```
-identity_verified   rv_hi signature valid (with a random nonce)
+identity_verified   cx_hi signature valid (with a random nonce)
 http_ok / udp_ok / rtc_ok     EWMA(probe success, α = 0.2) per service (rtc = it accepts WebRTC, so it can relay)
 rtt, first_seen, last_ok
 ```
 - **Score:** `q = round(100 · max(service ok) · min(1, days_known/7)^½)`. Browsers rank by `http_ok`, natives by `udp_ok` (falling back to `http_ok`). A `q` received from others is only a hint, capped at 50 until verified locally.
 - **Size and pruning:** ≤ 1000 entries; dropped when `q < 10` and no success for 7 days. Anchors re-probe 64 entries every 10 min (≤ 16 unverified probes per minute).
 - **Shared view:** best 32 + 8 random (so new anchors spread before they have a score).
-- **Spreading:** every 10 min each anchor pulls `rv_anchors` from 3 random anchors. Clients pull from every anchor they use. New anchors `announce_peer` and send `rv_hi` to known anchors, which probe back.
+- **Spreading:** every 10 min each anchor pulls `cx_anchors` from 3 random anchors. Clients pull from every anchor they use. New anchors `announce_peer` and send `cx_hi` to known anchors, which probe back.
 
 **Bootstrap channels** (all tried in parallel, the first verified anchor wins):
 
@@ -153,12 +153,12 @@ rtt, first_seen, last_ok
 | Local cache (IndexedDB / `~/.config/corvax/anchors.txt`) | ✅ | ✅ |
 | Baked-in `anchors.txt` file (in the package / repo) | ✅ | ✅ |
 | Any text: invite link, paste, file, any URL incl. any anchor's homepage (`sources: [...]`) | ✅ (HTTPS + CORS) | ✅ |
-| `rv_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
-| DNS TXT `_rv-anchors.<domain>` (`dohDomains: [...]`) | ✅ via public DoH JSON | ✅ via system resolver |
+| `cx_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
+| DNS TXT `_corvax-anchors.<domain>` (`dohDomains: [...]`) | ✅ via public DoH JSON | ✅ via system resolver |
 | Mainline `get_peers` on the anchor infohash | ❌ | ✅ |
-| LAN: UDP broadcast/multicast `RV?` on port 4799, mDNS `_rv._udp.local` TXT | ❌ | ✅ (every native node answers) |
+| LAN: UDP broadcast/multicast `CX?` on port 4799, mDNS `_corvax._udp.local` TXT | ❌ | ✅ (every native node answers) |
 
-**Automatic promotion:** every native node calls `rv_check` at start and every 30 min. Each service that strangers can reach is switched on: UDP → DHT server mode, STUN, `announce_peer`; HTTP → homepage and `/krpc` for others. Relaying is on for every peer anyway. `--no-anchor` opts out.
+**Automatic promotion:** every native node calls `cx_check` at start and every 30 min. Each service that strangers can reach is switched on: UDP → DHT server mode, STUN, `announce_peer`; HTTP → homepage and `/krpc` for others. Relaying is on for every peer anyway. `--no-anchor` opts out.
 
 ---
 
@@ -173,7 +173,7 @@ Plain standard offer/answer. **No SDP templates and no SDP editing.**
 3 OFFER    A: createOffer → setLocalDescription → msg {t:'offer', sid, sdp}
 4 ANSWER   B: setRemoteDescription → createAnswer → setLocalDescription → msg {t:'answer', sid, sdp}
 5 TRICKLE  both send msg {t:'cand', sid, c} as candidates appear; candidates that arrive early are queued
-6 OPEN     DataChannels open: id 0 = the app's channel, id 1 = "rv" control channel (both negotiated)
+6 OPEN     DataChannels open: id 0 = the app's channel, id 1 = "cx" control channel (both negotiated)
 ```
 
 ### 7.2 Relayed through a third peer (automatic when direct fails, default)
@@ -225,7 +225,7 @@ RTCPeerConnection = options.RTCPeerConnection          // 1. injected by the app
 
 - **Beacon:** signature, monotonic seq, ≤ 1000 B, checked on store and on use.
 - **Message:** ≤ 4 KB, signature, `to`, ts window, id dedup.
-- **Per IP, one token bucket** (cost: `put` 6, `rv_check` 12, `rv_send` 1, others 0.5; refill 60/min). HTTP body ≤ 8 KB; ≤ 4 open long polls per IP.
+- **Per IP, one token bucket** (cost: `put` 6, `cx_check` 12, `cx_send` 1, others 0.5; refill 60/min). HTTP body ≤ 8 KB; ≤ 4 open long polls per IP.
 - **DHT:** tokens = SHA1(secret ‖ ip), rotated every 10 min; routing table ≤ 1000; responders added only after they answer.
 - **Book:** lines ≤ 255 chars; public unicast IPs only (except entries learned on the LAN).
 - **Relaying (each peer, configurable):**
@@ -250,7 +250,7 @@ RTCPeerConnection = options.RTCPeerConnection          // 1. injected by the app
 | `src/peer.js` | `Peer`: identity, book, HTTP client (retries, long poll, acks), publish/resolve/send | 180 | ✏️ |
 | `src/rtc.js` | `connect`/`accept`: offer/answer/trickle, control channel, fallback to relay | 120 | ✏️ |
 | `src/relay.js` | `via` negotiation, bridging for others, relayed channel (E2E frames, same interface), limits | 150 | ⬜ |
-| `src/anchor.js` | UDP demux, HTTP server, inboxes, `rv_*` handlers, token bucket, replay cache | 220 | ✏️ |
+| `src/anchor.js` | UDP demux, HTTP server, inboxes, `cx_*` handlers, token bucket, replay cache | 220 | ✏️ |
 | `src/home.js` | homepage template | 50 | ⬜ |
 | `src/stun.js` | STUN binding responder (anchors are the STUN servers) | 25 | ⬜ |
 | `src/lan.js` | broadcast/multicast + mDNS responder and query | 100 | ⬜ |
@@ -264,7 +264,7 @@ RTCPeerConnection = options.RTCPeerConnection          // 1. injected by the app
 ## 11. API (all of it)
 
 ```js
-import { Peer } from 'corvax'                 // browsers: https://<anchor>/rv/index.js · Deno: npm:corvax
+import { Peer } from 'corvax'                 // browsers: https://<anchor>/cx/index.js · Deno: npm:corvax
 
 const me = await Peer.create({
   seed,                                           // optional; persisted by the caller
@@ -294,8 +294,9 @@ CLI: `corvax node` (a peer that promotes itself), `corvax anchor`, `corvax ancho
 | `core` | encodings round-trip; truncated bencode can't hang; seed → same keys everywhere; Beacon tamper; message tamper, **reflection**, redirection (`to`) and replay rejected; anchor lines grepped from messy text; score maths |
 | `dht` | 20 loopback nodes: put/get, stale seq + bad signature rejected, announce_peer → get_peers |
 | `book` | 10 anchors, each knowing one neighbour, converge to all 10; a wrong-key line is never verified; an anchor with HTTP up but UDP dead scores well for browsers only; a dead anchor decays |
-| `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves and sends, A's long poll receives; retried POST not executed twice; `after` acks delete; newer poll ends the older one; `rv_check` turns on only reachable services; token bucket |
+| `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves and sends, A's long poll receives; retried POST not executed twice; `after` acks delete; newer poll ends the older one; `cx_check` turns on only reachable services; token bucket |
 | `home` | `GET /logo` and `/favicon.ico` return the image with a long cache header; `GET /` ≤ 10 KB, no `<script>`, no external URLs, escapes a hostile line, `addAnchors(page)` recovers every listed anchor |
+| `core` (wire names) | the wire names in `SPEC.md` (`cx_*`, `corvax-anchor:`, `_cx`, `CX?`, `_corvax._udp`, `cx/…` labels) match the code |
 | `relay` | with direct ICE blocked between A and B (test hook): connect via a third **browser**, via a **Node** peer and via an **anchor**; C sees only ciphertext (frames not decryptable with C's keys); a forged `bridge` for a sid C wasn't asked by both sides is ignored; limits enforced; `relay: 'never'` gives `'ice-failed'` |
 | `lan` | broadcast and mDNS discovery between two nodes |
 | `browser` | Playwright **Chromium, Firefox, WebKit**: two pages bootstrap from an anchor homepage, connect direct (`kind: 'direct'`), then with direct blocked through a third page (`kind: 'peer'`) |
@@ -307,7 +308,7 @@ CLI: `corvax node` (a peer that promotes itself), `corvax anchor`, `corvax ancho
 ## 13. Build order
 
 1. `crypto` (seed → keys), `message`, `dht` hooks + get_peers/announce_peer → `core`, `dht`
-2. `book` + `rv_hi`/`rv_anchors` → `book`
+2. `book` + `cx_hi`/`cx_anchors` → `book`
 3. `anchor` (HTTP `/krpc`, long poll, acks, replay cache, inboxes) + `peer` HTTP client + `home` → `anchor`, `home`
 4. `rtc` (standard offer/answer, control channel) + `stun` → `browser` direct
 5. `relay` → `relay`, `browser` relayed
@@ -317,6 +318,9 @@ CLI: `corvax node` (a peer that promotes itself), `corvax anchor`, `corvax ancho
 ---
 
 ## 14. Decisions taken in review (and why)
+
+**Naming (wire level, frozen with `cx/1`):** queries `cx_*` · anchor lines `corvax-anchor:` · Beacon TXT name `_cx` · key-derivation labels `cx/…` · signed strings `cx-hi`, `cx-listen:` · LAN probe `CX?` · mDNS `_corvax._udp.local` · DNS bootstrap `_corvax-anchors.<domain>` · Mainline infohash `SHA1("corvax anchors v1")` · library path `/cx/*.js` · control DataChannel label `cx`.
+
 
 | Change | Why |
 |---|---|
