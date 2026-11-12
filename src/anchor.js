@@ -67,6 +67,8 @@ export async function anchor ({ port = 4799, host = '0.0.0.0', bootstrap = [], m
     try {
       const path = decodeURIComponent(new URL(req.url, 'http://x').pathname)
       if (req.method === 'OPTIONS') return res.end()
+      if (path === '/logo') return asset(res, 'corvax-web.png', 'image/png')
+      if (path === '/favicon.ico') return asset(res, 'favicon.ico', 'image/x-icon')
       if (path === '/') return file(res, 'demo.html', 'text/html')
       if (/^\/rv\/[a-z]+\.js$/.test(path)) return file(res, path.slice(4), 'text/javascript')
       const addr = path.slice(1)
@@ -107,6 +109,13 @@ const body = req => new Promise((resolve, reject) => {
   req.on('data', d => { n += d.length; if (n > MAX_MSG) req.destroy(); else parts.push(d) })
   req.on('end', () => resolve(new Uint8Array(Buffer.concat(parts)))).on('error', reject)
 })
+// The logo never changes for a given release, so browsers may cache it for a year.
+const logoDir = new URL('../assets/logo/', import.meta.url)
+async function asset (res, name, type) {
+  res.setHeader('cache-control', 'public, max-age=31536000, immutable')
+  res.setHeader('content-type', type)
+  res.end(await readFile(new URL(name, logoDir)))
+}
 async function file (res, name, type) {
   res.setHeader('content-type', type)
   res.end(await readFile(new URL(name, here)))

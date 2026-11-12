@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// rv anchor   [--port 4799] [--bootstrap host:port,...] [--mainline]
-// rv id
-// rv resolve <address>        [--anchor ws://...]
-// rv send    <address> <text> [--anchor ws://...]
-// rv listen                   [--anchor ws://...]
+// corvax anchor   [--port 4799] [--bootstrap host:port,...] [--mainline]
+// corvax id
+// corvax resolve <address>        [--anchor ws://...]
+// corvax send    <address> <text> [--anchor ws://...]
+// corvax listen                   [--anchor ws://...]
 import { anchor } from '../src/anchor.js'
 import { Peer } from '../src/peer.js'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
@@ -17,7 +17,7 @@ for (let i = 0; i < rest.length; i++) {
   else args.push(rest[i])
 }
 const anchors = String(flags.anchor || process.env.RV_ANCHOR || 'ws://localhost:4799').split(',')
-const seedFile = process.env.RV_SEED_FILE || join(homedir(), '.config', 'rv', 'seed')
+const seedFile = process.env.RV_SEED_FILE || join(homedir(), '.config', 'corvax', 'seed')
 
 async function me () {
   let seed
@@ -42,5 +42,5 @@ if (cmd === 'anchor') {
   console.log(`listening as ${p.address}`)
   p.on(({ from, body }) => console.log(`${from}: ${typeof body === 'string' ? body : JSON.stringify(body)}`))
 } else {
-  console.log('usage: rv anchor | id | resolve <addr> | send <addr> <text> | listen   [--anchor ws://host:port]')
+  console.log('usage: corvax anchor | id | resolve <addr> | send <addr> <text> | listen   [--anchor ws://host:port]')
 }

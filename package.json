@@ -1,11 +1,11 @@
 {
-  "name": "rendezvous",
+  "name": "corvax",
   "version": "0.1.0",
-  "description": "Universal peer discovery and signalling: one address, one signed record, the BitTorrent DHT, zero dependencies.",
+  "description": "CORVAX: find any peer by its key and open a WebRTC DataChannel to it. Universal discovery and signalling, zero dependencies.",
   "type": "module",
   "exports": { ".": "./src/index.js", "./anchor": "./src/anchor.js" },
-  "bin": { "rv": "bin/rv.js" },
-  "files": ["src", "bin"],
+  "bin": { "corvax": "bin/corvax.js" },
+  "files": ["src", "bin", "assets/logo/corvax-web.png", "assets/logo/favicon.ico"],
   "engines": { "node": ">=22" },
   "scripts": { "test": "node --test test/" },
   "license": "MIT"

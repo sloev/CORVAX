@@ -1,4 +1,4 @@
-# Rendezvous: Plan v1.0 (frozen scope)
+# CORVAX: Plan v1.0 (frozen scope)
 
 > **Find any peer by its key, from any runtime, and open an encrypted WebRTC DataChannel to it.**
 > The infrastructure introduces. The peers communicate.
@@ -7,7 +7,7 @@
 
 ## 1. Scope
 
-Rendezvous does five things and then gets out of the way:
+CORVAX does five things and then gets out of the way:
 
 1. **Identity:** one seed → an Ed25519 identity key (the permanent address) + an X25519 encryption key.
 2. **Anchor book:** every node keeps a verified, scored list of public anchors (the bootstrap nodes) and shares it over every channel it has.
@@ -39,7 +39,7 @@ Rendezvous does five things and then gets out of the way:
 - **Core has zero runtime dependencies and no build step.** Plain ESM JavaScript; the browser loads the same files Node runs. Native runtimes get one *optional* default WebRTC library (§8).
 - **Standard crypto only:** WebCrypto Ed25519, X25519, HKDF-SHA256, AES-GCM, SHA-1/256. No custom key conversions.
 - **Small but not at the expense of safety.** Target is roughly 1,600 lines; correctness and tests come first.
-- **Platforms:** current Chrome, Firefox, Safari; Node ≥ 22, Bun ≥ 1.1, Deno ≥ 2 (via `npm:rendezvous`).
+- **Platforms:** current Chrome, Firefox, Safari; Node ≥ 22, Bun ≥ 1.1, Deno ≥ 2 (via `npm:corvax`).
 
 ---
 
@@ -109,21 +109,22 @@ Relay      frame = counter 8 | AES-GCM_Kdir(data) | tag 16;  Kdir = HKDF(X25519(
 - **Every reply is a KRPC reply**, including errors.
 - **Clients retry** with backoff, and the same `t` (transaction id) is answered from a short replay cache, so a retried `POST` never executes twice.
 
-**Anchor HTTP endpoints:** `GET /` (homepage = anchor list) · `POST /krpc` · `GET /rv/*.js` (the library) · `GET /demo`. CORS `*` everywhere.
+**Anchor HTTP endpoints:** `GET /` (homepage = anchor list) · `POST /krpc` · `GET /rv/*.js` (the library) · `GET /logo` (the lightweight logo, long cache) · `GET /favicon.ico` · `GET /demo`. CORS `*` everywhere.
 
 ### The homepage (`GET /`)
 Every node reachable over HTTP serves a thin page, so anyone who stumbles on it learns what it is and how to join.
-1. **What this is:** two sentences ("A Rendezvous anchor: it helps peers find each other by key and open direct WebRTC connections. It stores nothing but signed address records and short-lived encrypted messages.")
+0. **The CORVAX logo** (the lightweight version from `/logo`, ~48 px) and the name
+1. **What this is:** two sentences ("A CORVAX anchor: it helps peers find each other by key and open direct WebRTC connections. It stores nothing but signed address records and short-lived encrypted messages.")
 2. **This node:** its anchor line, which services it offers (UDP/HTTP/relay), and its uptime
 3. **How to use it:**
    - browser: `import { Peer } from '<origin>/rv/index.js'`
-   - native: `npx rendezvous node`
+   - native: `npx corvax node`
    - shell: `curl -s <origin> | grep -o 'rv-anchor:[^ <]*'`
    - plus links to `/demo` and the repo
 4. **Known anchors:** the shared view, one anchor line per row with its score, in a `<pre>`
 
 Rules:
-- server-rendered from one template string, **no JavaScript, no external requests**
+- server-rendered from one template string, **no JavaScript, no external requests** (the only extra request is the same-origin `/logo`: 96 px, 2.9 KB, shown at 48 px, cached for a year)
 - ≤ 10 KB, system font, dark and light mode, readable on a phone
 - every dynamic value HTML-escaped
 - **it is the anchor list:** there's no `/anchors.txt` endpoint, and machines use `rv_anchors`.
@@ -149,7 +150,7 @@ rtt, first_seen, last_ok
 
 | Channel | Browser | Native |
 |---|---|---|
-| Local cache (IndexedDB / `~/.config/rv/anchors.txt`) | ✅ | ✅ |
+| Local cache (IndexedDB / `~/.config/corvax/anchors.txt`) | ✅ | ✅ |
 | Baked-in `anchors.txt` file (in the package / repo) | ✅ | ✅ |
 | Any text: invite link, paste, file, any URL incl. any anchor's homepage (`sources: [...]`) | ✅ (HTTPS + CORS) | ✅ |
 | `rv_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
@@ -254,15 +255,16 @@ RTCPeerConnection = options.RTCPeerConnection          // 1. injected by the app
 | `src/stun.js` | STUN binding responder (anchors are the STUN servers) | 25 | ⬜ |
 | `src/lan.js` | broadcast/multicast + mDNS responder and query | 100 | ⬜ |
 | `src/node.js` | native wiring: UDP socket, book file, LAN, DNS lookup, promotion, default WebRTC loader | 100 | ⬜ |
-| `bin/rv.js` | `rv node \| anchor \| anchors \| id \| resolve` | 50 | ✏️ |
+| `bin/corvax.js` | `corvax node \| anchor \| anchors \| id \| resolve` | 50 | ✏️ |
 | `src/demo.html` · `anchors.txt` | two-tab chat demo at `/demo` · baked-in list | 60 | ✏️ |
+| `assets/logo/` | CORVAX logo: `corvax-source.jpg` (original with green screen), `corvax.png` (1024 px, transparent), `corvax-{16…512}.png`, `favicon.ico` (16/32/48), **`corvax-web.png` (96 px, 64-colour palette, 2.9 KB) served at `/logo`** | n/a | ✅ |
 
 ---
 
 ## 11. API (all of it)
 
 ```js
-import { Peer } from 'rendezvous'                 // browsers: https://<anchor>/rv/index.js · Deno: npm:rendezvous
+import { Peer } from 'corvax'                 // browsers: https://<anchor>/rv/index.js · Deno: npm:corvax
 
 const me = await Peer.create({
   seed,                                           // optional; persisted by the caller
@@ -281,7 +283,7 @@ await me.resolve(address)                         // Beacon fields
 await me.send(address, body);  me.on(fn)          // raw signed + encrypted messages
 me.close()
 ```
-CLI: `rv node` (a peer that promotes itself), `rv anchor`, `rv anchors`, `rv id`, `rv resolve <addr>`; `--no-relay` opts out of relaying.
+CLI: `corvax node` (a peer that promotes itself), `corvax anchor`, `corvax anchors`, `corvax id`, `corvax resolve <addr>`; `--no-relay` opts out of relaying.
 
 ---
 
@@ -293,7 +295,7 @@ CLI: `rv node` (a peer that promotes itself), `rv anchor`, `rv anchors`, `rv id`
 | `dht` | 20 loopback nodes: put/get, stale seq + bad signature rejected, announce_peer → get_peers |
 | `book` | 10 anchors, each knowing one neighbour, converge to all 10; a wrong-key line is never verified; an anchor with HTTP up but UDP dead scores well for browsers only; a dead anchor decays |
 | `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves and sends, A's long poll receives; retried POST not executed twice; `after` acks delete; newer poll ends the older one; `rv_check` turns on only reachable services; token bucket |
-| `home` | `GET /` ≤ 10 KB, no `<script>`, no external URLs, escapes a hostile line, `addAnchors(page)` recovers every listed anchor |
+| `home` | `GET /logo` and `/favicon.ico` return the image with a long cache header; `GET /` ≤ 10 KB, no `<script>`, no external URLs, escapes a hostile line, `addAnchors(page)` recovers every listed anchor |
 | `relay` | with direct ICE blocked between A and B (test hook): connect via a third **browser**, via a **Node** peer and via an **anchor**; C sees only ciphertext (frames not decryptable with C's keys); a forged `bridge` for a sid C wasn't asked by both sides is ignored; limits enforced; `relay: 'never'` gives `'ice-failed'` |
 | `lan` | broadcast and mDNS discovery between two nodes |
 | `browser` | Playwright **Chromium, Firefox, WebKit**: two pages bootstrap from an anchor homepage, connect direct (`kind: 'direct'`), then with direct blocked through a third page (`kind: 'peer'`) |
