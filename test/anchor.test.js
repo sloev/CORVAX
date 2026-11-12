@@ -44,17 +44,22 @@ test('HTTP: retried POST runs once, acks delete, newer poll ends older, rate lim
   await rpc(a, 'cx_send', { to: me.pub, msg: random(200) }, tid)            // same transaction id: answered from cache
   await rpc(a, 'cx_send', { to: me.pub, msg: random(150) })
   let r = await listen(0)
-  assert.deepEqual(r.r.msgs.map(m => m.seq), [1, 2], 'retried POST stored once')
-  r = await listen(1)
-  assert.deepEqual(r.r.msgs.map(m => m.seq), [2], 'ack deletes seq 1')
+  const [s1, s2] = r.r.msgs.map(m => m.seq)
+  assert.ok(r.r.msgs.length === 2 && s1 < s2, 'retried POST stored once')
+  r = await listen(s1)
+  assert.deepEqual(r.r.msgs.map(m => m.seq), [s2], 'ack deletes the first')
 
-  const older = listen(2), t0 = Date.now()
+  const older = listen(s2), t0 = Date.now()
   await new Promise(resolve => setTimeout(resolve, 200))
-  const newer = listen(2)
+  const newer = listen(s2)
   assert.deepEqual((await older).r.msgs, [], 'older poll ended empty')
   assert.ok(Date.now() - t0 < 5000, 'older poll ended early')
   await rpc(a, 'cx_send', { to: me.pub, msg: random(100) })
-  assert.deepEqual((await newer).r.msgs.map(m => m.seq), [3], 'newer poll gets the next message')
+  const next = (await newer).r.msgs
+  assert.ok(next.length === 1 && next[0].seq > s2, 'newer poll gets the next message')
+
+  const big = await fetch(`http://127.0.0.1:${a.port}/krpc`, { method: 'POST', body: new Uint8Array(100e3) }).then(r => r.ok, () => false)
+  assert.equal(big, false, 'oversized body refused')
 
   let limited = false
   for (let i = 0; i < 12 && !limited; i++) limited = (await rpc(a, 'cx_check', { k: random(32) })).e?.[0] === 202
@@ -86,7 +91,7 @@ test('homepage: tiny shell + app.js for browsers, plain anchor list for everythi
   assert.match(app.headers.get('content-type'), /javascript/)
   const js = await app.text()
   assert.match(js, /const LOGO = 'data:image\/png;base64,iVBOR/, 'logo inlined')
-  assert.ok(!/https?:\/\/(?!github\.com)/.test(js.replace(/\$\{node\.origin\}/g, '')), 'app makes no external requests')
+  assert.ok(!/https?:\/\/(?!github\.com|cdn\.jsdelivr\.net\/npm\/corvax@1\/)/.test(js.replace(/\$\{node\.origin\}/g, '')), 'app makes no external requests (the CDN URL is shown, never loaded)')
   assert.equal((await fetch(base + '/logo')).status, 404, '/logo endpoint removed')
   assert.equal((await fetch(base + '/demo')).status, 404, '/demo endpoint removed (the homepage is the demo)')
 

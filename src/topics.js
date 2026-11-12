@@ -353,10 +353,11 @@ export class Topic {
     return this.record
   }
 
-  async publish () {
+  // beacon: false = presence only (no Beacon, so topic neighbours can't link to you).
+  async publish ({ beacon = true } = {}) {
     if (this.topics.closed) throw fail('closed')
     this.published = true
-    await this.topics.ensureBeacon().catch(() => {})
+    if (beacon) await this.topics.ensureBeacon().catch(() => {})
     const stored = (await this.topics.publishNow([this])).get(this) || 0
     this.topics.schedule()
     if (!stored) throw fail('no-storage', 'no storage peer accepted the record')

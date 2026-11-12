@@ -20,7 +20,7 @@ export class TopicStore {
     this.waiters = new Set()
   }
 
-  async put (raw) {
+  async put (raw, restore = false) {
     const r = await readRecord(raw)
     if (!r) return 'bad'
     const now = this.now(), t = hex(r.t), k = hex(r.k)
@@ -28,7 +28,7 @@ export class TopicStore {
     const old = this.topics.get(t)?.get(k)
     if (old && old.seq > r.seq) return 'stale'
     if (old && old.seq === r.seq) return 'dup'
-    if (r.exp < now - this.skew && !old) return 'expired'          // a tombstone for nothing we hold: nothing to do
+    if (r.exp < now - this.skew && !old && !restore) return 'expired'          // a tombstone for nothing we hold: nothing to do
     if (!old) {
       if ((this.counts.get(k) || 0) >= this.perProvider || this.size >= this.maxRecords) return 'full'
       this.counts.set(k, (this.counts.get(k) || 0) + 1); this.size++
@@ -83,6 +83,9 @@ export class TopicStore {
     }
     while (this.log.length && (this.log.length > this.logMax || now - this.log[0].at > this.logAge)) this.log.shift()
   }
+
+  // Restore persisted records, tombstones included (they keep blocking replays of older records).
+  async load (raws) { for (const raw of raws) await this.put(raw, true) }
 
   close () { for (const w of [...this.waiters]) w.done() }
 

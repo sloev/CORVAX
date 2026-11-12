@@ -16,7 +16,8 @@ export class Inboxes {
   async put (to, msg) {
     const box = this.#box(to), h = hex(await sha256(msg))
     if (!box.msgs.some(m => m.h === h)) {                              // retries are idempotent
-      box.msgs.push({ seq: ++box.seq, msg, h, t: Date.now() })
+      box.seq = Math.max(box.seq + 1, Date.now())                    // rises across restarts: a client's `after` stays valid
+      box.msgs.push({ seq: box.seq, msg, h, t: Date.now() })
       if (box.msgs.length > INBOX_MAX) box.msgs.shift()
     }
     box.waiter?.(); box.waiter = null

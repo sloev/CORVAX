@@ -11,10 +11,24 @@ Find any peer by its key or by a topic, from any runtime, and open an encrypted 
 
 ## Use
 
-```js
-import { Peer } from 'https://<anchor>/cx/index.js'          // or: npm i corvax / npm:corvax
+Browsers, no build step:
 
-const me = await Peer.create()                 // bootstraps from the anchor that served the file
+```html
+<script type="module">
+  import { Peer } from 'https://cdn.jsdelivr.net/npm/corvax@1/dist/corvax.min.js'
+</script>
+```
+
+Node ≥ 22, Bun, Deno and bundlers:
+
+```sh
+npm i corvax          # then: import { Peer } from 'corvax'   (Deno: 'npm:corvax')
+```
+
+Every green push to `main` releases `1.0.N` (npm, plus a GitHub release with the bundle; the 10 newest are kept, `latest` tags the newest). `corvax@1` follows them; pin with `corvax@1.0.N`. The full JS reference is on every anchor's homepage under **DOX**.
+
+```js
+const me = await Peer.create()                 // bootstraps from known anchors
 await me.publish()                             // make your address resolvable
 me.accept(({ from, channel }) => channel.onmessage = e => console.log(from, e.data))
 const { channel } = await me.connect('<address>')
@@ -37,7 +51,7 @@ npx corvax anchor --public-host IP   # the first anchors of a network
 npx corvax anchors                   # print the anchor book
 ```
 
-- **Browsers** opening a node's `/` get the CORVAX app: **DOX** (a short introduction), **APP** (identity, peers, messages, topics, follows, updates) and **STATS** (this anchor and your node).
+- **Browsers** opening a node's `/` get the CORVAX app: **DOX** (an overview and the JS API reference; shown first, then the last view is remembered), **APP** (identity, peers, messages, topics, follows, updates) and **STATS** (this anchor and your node).
 - **`curl -s http://node:4799/`** gets the plain anchor list.
 - **Cloudflare Worker anchor:** `npx wrangler deploy` in this repo (HTTPS only: inboxes, topic storage, Beacons mirrored to Mainline via pkarr, and a rate-limited WebSocket relay as a last resort; no UDP, so no DHT routing or STUN). Optional fixed key: `wrangler secret put CORVAX_SEED` (64 hex chars). Check it with `node test/worker-check.js https://corvax.<account>.workers.dev`.
 - **HTTPS pages** need an anchor with an HTTPS origin: `cloudflared tunnel --url http://localhost:4799`, then `--web https://…`.
@@ -46,7 +60,7 @@ npx corvax anchors                   # print the anchor book
 ## Test
 
 ```sh
-npm test                                      # Node, incl. Chromium (Playwright)
+npm run build && npm test                     # bundle, then Node incl. Chromium (Playwright)
 bun test/runtime-smoke.js; deno run -A test/runtime-smoke.js
 node test/live/pkarr.js                       # internet: Mainline compatibility via the pkarr relay
 ```

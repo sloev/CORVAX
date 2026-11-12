@@ -6,6 +6,7 @@ import { identity, sign, verify } from '../src/crypto.js'
 import { seal, open } from '../src/message.js'
 import { makeBeacon, verifyBeacon, fields, pack, unpack } from '../src/record.js'
 import { Book, parseLine, formatLine, isPublic } from '../src/book.js'
+import { Inboxes } from '../src/inbox.js'
 
 test('z-base32 round trip (52 chars for a key)', () => {
   for (let i = 0; i < 50; i++) {
@@ -70,6 +71,18 @@ test('anchor lines: grep from messy text, parse, format, public filter', () => {
   assert.ok(isPublic('2a01:4f8::1') && !isPublic('fd00::1') && !isPublic('10.1.2.3') && !isPublic('192.168.1.1') && isPublic('1.1.1.1'))
   const hostile = `corvax-anchor:${key}@8.8.4.4:1;web=<script>`
   assert.equal(parseLine(hostile.slice(0, hostile.indexOf('<'))).web, undefined)
+  for (const web of ['http://127.0.0.1:80', 'http://x@10.0.0.1', 'https://[fd00::1]'])
+    assert.equal(new Book().add(`corvax-anchor:${z32(random(32))}@8.8.8.8:1;web=${web}`)[0].web, undefined, `private web= dropped: ${web}`)
+})
+
+test('inbox sequence numbers keep rising across restarts', async () => {
+  const k = random(32), a = new Inboxes()
+  await a.put(k, random(10))
+  const [{ seq }] = await a.listen(k, 0)
+  await new Promise(resolve => setTimeout(resolve, 2))
+  const b = new Inboxes()                                                  // the anchor restarted; the client still acks `seq`
+  await b.put(k, random(10))
+  assert.equal((await b.listen(k, seq)).length, 1, 'new message not hidden by an old ack')
 })
 
 test('score: unverified capped at 50, verified grows with age, dead decays', () => {

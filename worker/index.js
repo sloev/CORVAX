@@ -10,12 +10,13 @@ import { Book, formatLine } from '../src/book.js'
 import { homepage, stats } from '../src/home.js'
 import { pack, unpack, verifyBeacon } from '../src/record.js'
 import { serveSocket } from '../src/relay.js'
-import { hex, unhex, utf8, str, z32, unz32, equal } from '../src/bytes.js'
+import { hex, unhex, utf8, str, z32, unz32, equal, readCapped } from '../src/bytes.js'
 import favicon from '../assets/logo/favicon.ico'
 
 const RELAY = 'https://relay.pkarr.org', CORS = { 'access-control-allow-origin': '*' }
 // WebSocket relaying is a last resort here: few, slow sessions and a small hourly budget.
 const RELAYING = { sessions: 4, kbps: 256, hourBytes: 200e6, socketsPerIp: 2, opensPerIpMinute: 6 }
+const POLLS_PER_IP = 64, BODY_MAX = 8192
 const COST = { put: 6, cx_tpub: 2, cx_send: 1, cx_tfind: 1, get: 1 }
 
 export default {
@@ -33,7 +34,7 @@ export default {
 export class Anchor extends DurableObject {
   constructor (ctx, env) {
     super(ctx, env)
-    Object.assign(this, { inboxes: new Inboxes(), store: new TopicStore(), book: new Book(), beacons: new Map(), buckets: new Map(), replays: new Map(), started: Date.now(), swept: 0 })
+    Object.assign(this, { inboxes: new Inboxes(), store: new TopicStore(), book: new Book(), beacons: new Map(), buckets: new Map(), replays: new Map(), polls: new Map(), started: Date.now(), swept: 0 })
     this.relayHost = { relayFor: true, bridges: new Map(), channels: new Map(), limits: RELAYING }
     this.sockets = new Map()                                     // ip -> { open, opens: [times] }
     this.ready = ctx.blockConcurrencyWhile(async () => {
@@ -42,6 +43,9 @@ export class Anchor extends DurableObject {
       this.id = await identity(unhex(seed))
       this.key = z32(this.id.pub)
       this.book.add(await ctx.storage.get('book') || '')
+      // Topic records outlive eviction: every accepted record (and tombstone) is kept in SQLite until it lapses.
+      ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS topics (t TEXT, k TEXT, raw BLOB, exp INTEGER, PRIMARY KEY (t, k))')
+      await this.store.load(ctx.storage.sql.exec('SELECT raw FROM topics').toArray().map(r => new Uint8Array(r.raw)))
     })
   }
   line (origin) { const u = new URL(origin); return formatLine({ key: this.key, host: u.hostname, port: +(u.port || 443), web: origin }) }
@@ -50,7 +54,7 @@ export class Anchor extends DurableObject {
   async fetch (req) {
     await this.ready
     const url = new URL(req.url), origin = url.origin, ip = req.headers.get('cf-connecting-ip') || 'local'
-    if (Date.now() - this.swept > 30e3) { this.swept = Date.now(); this.store.sweep(); this.inboxes.sweep() }
+    if (Date.now() - this.swept > 30e3) { this.swept = Date.now(); this.store.sweep(); this.inboxes.sweep(); this.ctx.storage.sql.exec('DELETE FROM topics WHERE exp < ?', Date.now() - 2 * (this.store.lease + this.store.skew)) }
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: { ...CORS, 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'content-type' } })
     if (req.method === 'POST' && url.pathname === '/krpc') return this.krpc(req, origin, ip)
     if (url.pathname === '/relay' && req.headers.get('upgrade') === 'websocket') return this.relay(ip)
@@ -63,19 +67,23 @@ export class Anchor extends DurableObject {
 
   async krpc (req, origin, ip) {
     const reply = m => new Response(encode(m), { headers: { ...CORS, 'content-type': 'text/plain' } })
-    const body = new Uint8Array(await req.arrayBuffer())
+    const body = await readCapped(req, BODY_MAX)
     let m
-    try { if (body.length > 8192) throw 0; m = decode(body) } catch { return reply({ y: 'e', e: [203, 'bad message'] }) }
+    try { m = decode(body) } catch { return reply({ y: 'e', e: [203, 'bad message'] }) }
     if (!(m.q instanceof Uint8Array) || !m.a || !(m.t instanceof Uint8Array) || m.t.length > 8) return reply({ y: 'e', e: [203, 'bad query'] })
     const q = str(m.q), key = `${ip}|${hex(m.t)}`
-    if (this.replays.has(key)) return reply(this.replays.get(key).m)
+    const hit = this.replays.get(key)
+    if (hit && Date.now() - hit.t < 60e3) return reply(hit.m)
     if (!this.allow(ip, q)) return reply({ t: m.t, y: 'e', e: [202, 'rate limited'] })
     let out
+    const poll = q === 'cx_listen' || q === 'cx_twatch'
+    if (poll && (this.polls.get(ip) || 0) >= POLLS_PER_IP) return reply({ t: m.t, y: 'e', e: [202, 'too many polls'] })
+    if (poll) this.polls.set(ip, (this.polls.get(ip) || 0) + 1)
     try { out = { t: m.t, y: 'r', r: await this.answer(q, m.a, origin, req.signal) } } catch (e) {
       const [code, msg] = Array.isArray(e) ? e : [201, e.message || 'error']
       out = { t: m.t, y: 'e', e: [code, msg] }
-    }
-    if (q !== 'cx_listen' && q !== 'cx_twatch') {
+    } finally { if (poll) { const n = this.polls.get(ip) - 1; n ? this.polls.set(ip, n) : this.polls.delete(ip) } }
+    if (!poll) {
       this.replays.set(key, { m: out, t: Date.now() })
       if (this.replays.size > 5000) for (const [k, v] of this.replays) if (Date.now() - v.t > 60e3) this.replays.delete(k)
     }
@@ -93,7 +101,7 @@ export class Anchor extends DurableObject {
 
   async answer (q, a, origin, signal) {
     if (q === 'ping') return {}
-    if (['cx_hi', 'cx_tpub', 'cx_tfind'].includes(q)) return serve({ id: this.id, store: this.store, line: this.line(origin), relay: true }, q, a)
+    if (['cx_hi', 'cx_tpub', 'cx_tfind'].includes(q)) return serve({ id: this.id, store: this.store, line: this.line(origin), relay: true, stored: raw => this.persist(raw) }, q, a)
     if (q === 'cx_anchors') { if (a.me instanceof Uint8Array && a.me.length <= 255) this.ctx.waitUntil(this.learn(str(a.me))); return { a: this.listing(origin) } }
     if (q === 'cx_send') {
       if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > 4096) throw [203, 'bad message']
@@ -125,7 +133,7 @@ export class Anchor extends DurableObject {
       let rec = this.beacons.get(z32(a.k))
       if (!rec || Date.now() - rec.at > 2 * 3600e3) {
         const r = await fetch(`${RELAY}/${z32(a.k)}`).catch(() => null)
-        const got = r?.ok && unpack(a.k, new Uint8Array(await r.arrayBuffer()))
+        const raw = r?.ok && await readCapped(r, 2048), got = raw && unpack(a.k, raw)
         if (got && await verifyBeacon(got) && (!rec || got.seq >= rec.seq)) rec = this.keep(got)
       }
       return rec ? { k: rec.pub, seq: rec.seq, sig: rec.sig, v: rec.v } : {}
@@ -148,6 +156,11 @@ export class Anchor extends DurableObject {
     return new Response(null, { status: 101, webSocket: client })
   }
 
+  persist (raw) {
+    const r = decode(raw)
+    this.ctx.storage.sql.exec('INSERT OR REPLACE INTO topics VALUES (?, ?, ?, ?)', hex(r.t), hex(r.k), raw.slice().buffer, r.exp)
+  }
+
   keep (rec) {
     this.beacons.delete(z32(rec.pub))
     this.beacons.set(z32(rec.pub), { ...rec, at: Date.now() })
@@ -160,8 +173,8 @@ export class Anchor extends DurableObject {
     for (const e of this.book.add(text)) {
       const n = random(16), url = e.web
       if (!url) continue
-      const r = await fetch(`${url}/krpc`, { method: 'POST', body: encode({ t: random(4), y: 'q', q: 'cx_hi', a: { n } }) })
-        .then(async res => decode(new Uint8Array(await res.arrayBuffer())).r, () => null)
+      const r = await fetch(`${url}/krpc`, { method: 'POST', body: encode({ t: random(4), y: 'q', q: 'cx_hi', a: { n } }), signal: AbortSignal.timeout(5000) })
+        .then(async res => decode(await readCapped(res, BODY_MAX)).r).catch(() => null)
       this.book.record(e.key, 'id', await hiOk(r, unz32(e.key), n))
       if (this.book.get(e.key)) this.book.record(e.key, 'http', !!r)
     }

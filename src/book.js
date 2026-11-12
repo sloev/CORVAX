@@ -39,6 +39,8 @@ export function isPublic (host) {
     (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19 || b === 51)) || (a === 203 && b === 0))
 }
 
+const publicUrl = u => { try { return isPublic(new URL(u).hostname.replace(/^\[|\]$/g, '')) } catch { return false } }
+
 export class Book {
   constructor ({ allowPrivate = false, now = () => Date.now() } = {}) {
     this.entries = new Map()     // key -> entry
@@ -52,6 +54,7 @@ export class Book {
     for (const raw of String(text).match(LINE_RE) || []) {
       const e = parseLine(raw.replace(/[.,;:!?)\]}]+$/, ''))   // lines quoted in prose end in punctuation
       if (!e || (!lan && !this.allowPrivate && !isPublic(e.host))) continue
+      if (e.web && !lan && !this.allowPrivate && !publicUrl(e.web)) delete e.web   // never fetch private URLs
       const old = this.entries.get(e.key)
       if (old) {
         if (!old.verified) Object.assign(old, { host: e.host, port: e.port, web: e.web ?? old.web })

@@ -84,7 +84,8 @@ export function httpServer (node) {
     try { m = decode(body) } catch { return reply(res, { y: 'e', e: [203, 'bad message'] }) }
     if (!(m.q instanceof Uint8Array) || !m.a || !(m.t instanceof Uint8Array) || m.t.length > 8) return reply(res, { y: 'e', e: [203, 'bad query'] })
     const q = str(m.q), a = m.a, key = `${ip}|${hex(m.t)}`
-    if (replays.has(key)) return res.end(replays.get(key).bytes)
+    const hit = replays.get(key)
+    if (hit && Date.now() - hit.t < 60e3) return res.end(hit.bytes)
     if (!allow(ip, q)) return reply(res, { t: m.t, y: 'e', e: [202, 'rate limited'] })
     const from = { host: ip, port, http: true }
     let out
@@ -93,7 +94,7 @@ export function httpServer (node) {
       out = { t: m.t, y: 'e', e: [code, msg] }
     }
     const bytes = encode(out)
-    if (q !== 'cx_listen') {
+    if (q !== 'cx_listen' && q !== 'cx_twatch') {
       replays.set(key, { bytes, t: Date.now() })
       if (replays.size > 5000) for (const [k, v] of replays) if (Date.now() - v.t > 60e3) replays.delete(k)
     }

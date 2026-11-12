@@ -1,10 +1,14 @@
 {
   "name": "corvax",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "CORVAX: find any peer by its key and open a WebRTC DataChannel to it. Universal discovery and signalling, zero dependencies.",
   "type": "module",
   "exports": {
-    ".": "./src/index.js",
+    ".": {
+      "browser": "./dist/corvax.min.js",
+      "default": "./src/index.js"
+    },
+    "./min": "./dist/corvax.min.js",
     "./anchor": "./src/anchor.js"
   },
   "bin": {
@@ -12,6 +16,7 @@
   },
   "files": [
     "src",
+    "dist",
     "bin",
     "assets/logo/favicon.ico"
   ],
@@ -19,6 +24,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "build": "esbuild src/index.js --bundle --minify --format=esm --platform=neutral --legal-comments=none --outfile=dist/corvax.min.js --banner:js=\"/*! CORVAX v${CORVAX_VERSION:-$npm_package_version} | MIT | github.com/sloev/corvax */\"",
     "test": "node --test --test-concurrency=1 --test-force-exit test/*.test.js"
   },
   "license": "MIT",
@@ -26,6 +32,23 @@
     "werift": "^0.27.0"
   },
   "devDependencies": {
+    "esbuild": "^0.25.10",
     "node-datachannel": "^0.33.6"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sloev/corvax.git"
+  },
+  "homepage": "https://corvax.sloev.workers.dev/",
+  "keywords": [
+    "p2p",
+    "webrtc",
+    "signalling",
+    "dht",
+    "discovery",
+    "peer-to-peer"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

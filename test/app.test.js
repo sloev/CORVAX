@@ -1,4 +1,4 @@
-// The homepage app as a person uses it: APP/DOX, identity, peers, messages, topics, updates, persistence.
+// The homepage app as a person uses it: DOX/APP/STATS, identity, peers, messages, topics, updates, persistence.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
@@ -20,20 +20,21 @@ test(`homepage app (${name})`, { skip: !playwright && 'playwright not installed'
     return { page, errors }
   }
   const [A, B] = [await open(), await open()]
+  await B.page.getByText('2 live visitors').waitFor({ timeout: 20000 })   // the page counts itself over CORVAX topic presence
   const tab = (p, label) => p.getByRole('navigation').getByRole('button', { name: label }).click()
 
-  // header: large inlined logo, APP/DOX toggle remembered across reloads
+  // header: inlined logo; DOX first for new visitors, the last view remembered across reloads
   assert.match(await A.page.locator('header img').getAttribute('src'), /^data:image\/png;base64,/)
-  assert.equal(await A.page.getByRole('button', { name: 'APP' }).getAttribute('aria-pressed'), 'true')
-  await A.page.getByRole('button', { name: 'DOX' }).click()
-  await A.page.getByText('What is CORVAX?').waitFor()
-  await A.page.reload()
-  await A.page.getByText('What is CORVAX?').waitFor()
-  assert.ok((await A.page.locator('details pre').last().textContent()).includes(a.line()), 'anchors under technical details')
+  assert.equal(await A.page.getByRole('button', { name: 'DOX' }).getAttribute('aria-pressed'), 'true')
+  await A.page.getByRole('heading', { name: 'Technical documentation' }).waitFor()
+  assert.ok(await A.page.getByText('topic.broadcast(body)').count(), 'API reference')
+  assert.ok((await A.page.locator('article pre').last().textContent()).includes(a.line()), 'known anchors listed')
   await A.page.getByRole('button', { name: 'STATS' }).click()
   await A.page.getByText('Peers listening').waitFor()
   await A.page.getByText('Go online in APP').waitFor()
-  await A.page.getByRole('button', { name: 'APP' }).click()
+  await A.page.reload()
+  await A.page.getByText('Peers listening').waitFor()
+  for (const p of [A.page, B.page]) await p.getByRole('button', { name: 'APP' }).click()
 
   // identities
   const live = async p => { await p.getByRole('button', { name: 'Create identity' }).click(); await p.getByRole('button', { name: 'Copy address' }).waitFor({ timeout: 15000 }); return p.evaluate(() => window.corvax.address) }
@@ -74,11 +75,10 @@ test(`homepage app (${name})`, { skip: !playwright && 'playwright not installed'
   await tab(B.page, 'Discover'); await B.page.getByText('chess', { exact: true }).waitFor()
   await tab(B.page, 'Peers'); await B.page.getByText(addrA.slice(0, 6)).first().waitFor()
 
-  // Forget clears everything
-  await B.page.getByRole('button', { name: 'DOX' }).click()
-  await B.page.getByText('Technical details').click()
+  // Forget (APP → Home) clears everything; a cleared browser starts on DOX again
+  await tab(B.page, 'Home')
   await B.page.getByRole('button', { name: 'Forget my identity' }).click()
-  await B.page.getByRole('button', { name: 'APP' }).waitFor()
+  await B.page.getByRole('heading', { name: 'Technical documentation' }).waitFor({ timeout: 10000 })
   await B.page.getByRole('button', { name: 'APP' }).click()
   await B.page.getByRole('button', { name: 'Create identity' }).waitFor({ timeout: 10000 })
   assert.deepEqual([...A.errors, ...B.errors], [], 'no page errors')

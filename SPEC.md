@@ -32,7 +32,7 @@ v     DNS response (≤ 1000 B) of TXT records named "_cx", each "key=value":
 **Anchor line** (≤ 255 chars):
 - Format: `corvax-anchor:<z32 ed_pub>@<ip | [ipv6] | dns name>:<port>[;web=<https origin>][;q=<0-100>]`.
 - Readers find lines in any text with `corvax-anchor:[^\s"'<>\`]+` and strip trailing `.,;:!?)]}`.
-- A line is only a claim until `cx_hi` succeeds.
+- A line is only a claim until `cx_hi` succeeds. A `web=` whose host isn't public is dropped (except for LAN lines).
 
 **Message** (≤ 4096 B):
 ```
@@ -49,7 +49,7 @@ Every transport carries bencoded KRPC (`{t, y:"q", q, a}` → `{t, y:"r", r}` | 
 | Transport | Framing | Notes |
 |---|---|---|
 | UDP | one datagram | a datagram with first byte < 2 and the STUN cookie at bytes 4–7 is STUN (binding replies) |
-| HTTP `POST /krpc` | one body, one reply | `Content-Type: text/plain` (no CORS preflight), ≤ 8 KB. A repeated `t` from the same IP within 60 s gets the cached reply. `get`, `put` and `get_peers` are recursive (the peer does the DHT work; no token); `get` also carries `k` (the public key) so HTTPS-only anchors can ask a pkarr relay |
+| HTTP `POST /krpc` | one body, one reply | `Content-Type: text/plain` (no CORS preflight), ≤ 8 KB, refused before it is read in full. A repeated `t` from the same IP within 60 s gets the cached reply. `get`, `put` and `get_peers` are recursive (the peer does the DHT work; no token); `get` also carries `k` (the public key) so HTTPS-only anchors can ask a pkarr relay |
 | WebRTC | text frame `"K" ‖ b64(bencode)` | on a connection's `cx` channel or a topic link: `cx_hi`, `cx_tpub`, `cx_tfind` |
 
 Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabled · 206 bad signature · 302 stale.
@@ -67,7 +67,7 @@ Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabl
 | `cx_check` | `{k, port, hport}` → `{udp, http, ip, by}` | asks a different anchor (`cx_probe`) to `cx_hi` the caller |
 | `cx_probe` | `{ip, port, hport, k}` → `{udp, http}` | only for callers that are verified anchors |
 | `cx_send` | `{to, msg}` → `{queued}` | inbox: 120 s, ≤ 64 per key, deduplicated by SHA-256 |
-| `cx_listen` | `{k, ts, sig, after?}` → `{msgs: [{seq, msg}]}` | HTTP. `sig = Ed25519("cx-listen:" ‖ ts)`, ±300 s. Deletes `seq ≤ after`; waits ≤ 25 s; a newer poll for `k` ends the older one |
+| `cx_listen` | `{k, ts, sig, after?}` → `{msgs: [{seq, msg}]}` | HTTP. `sig = Ed25519("cx-listen:" ‖ ts)`, ±300 s. `seq` = max(previous + 1, unix ms), so it keeps rising across anchor restarts. Deletes `seq ≤ after`; waits ≤ 25 s; a newer poll for `k` ends the older one |
 | `cx_tpub` | `{r: [record ≤ 32]}` → `{ok: [status], now}` | §6 |
 | `cx_tfind` | `{t: [id ≤ 16]}` → `{r, now}` | live records, ≤ 100 per topic, newest first |
 | `cx_twatch` | `{t: [id ≤ 64], c?}` → `{c, r, snap?, now}` | HTTP long poll, §6 |
@@ -115,7 +115,7 @@ record = bencode { t: id, k: ed_pub, seq, exp, sig }    sig = Ed25519("cx-topic"
 | `full` | a new (t, k) would exceed 64 topics per k or 50 000 records |
 | `ok` | otherwise |
 
-- **Retention:** live records are kept until `exp + 60 s`, tombstones for 11 min (so older records can't be replayed).
+- **Retention:** live records are kept until `exp + 60 s`, tombstones for 11 min (so older records can't be replayed). Storage that restarts (e.g. the Worker) reloads both.
 - **Event log:** each `ok` appends `{n, t, record}`; ≤ 10 000 entries and 30 min. The cursor is `"<epoch>:<n>"`, with the epoch random per start.
 - **`cx_twatch`:**
   - a missing, foreign, future or trimmed cursor gets `{snap: 1, r: live records, c}`

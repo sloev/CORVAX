@@ -45,6 +45,16 @@ export const unz32 = s => {
 
 export class CorvaxError extends Error { constructor (code, message) { super(message || code); this.code = code } }
 export const fail = (code, message) => new CorvaxError(code, message)
+// Read a fetch body (Request or Response) of at most max bytes; null if it is larger.
+export async function readCapped (r, max) {
+  if (+r.headers.get('content-length') > max) return null
+  const reader = r.body?.getReader(), parts = []
+  for (let n = 0, c; reader && !(c = await reader.read()).done;) {
+    if ((n += c.value.length) > max) { reader.cancel().catch(() => {}); return null }
+    parts.push(c.value)
+  }
+  return concat(...parts)
+}
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 export const unref = t => { t?.unref?.(); return t }
 export const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]] } return a }

@@ -42,6 +42,18 @@ test('tombstone removes presence and blocks replay of older records', async () =
   assert.equal(store.find([t]).length, 0)
 })
 
+test('restore after a restart keeps live records and tombstones', async () => {
+  const { store, clock, t } = await setup(), a = await identity(), b = await identity()
+  const old = await makeRecord(b, t, 1, clock.get() + LEASE)
+  await store.put(await makeRecord(a, t, 1, clock.get() + LEASE)); await store.put(old)
+  await store.put(await makeRecord(b, t, 2, clock.get()))                  // b leaves: a tombstone
+  const raws = [...store.topics.get([...store.topics.keys()][0]).values()].map(e => e.raw)
+  const fresh = new TopicStore({ now: clock.get })
+  await fresh.load(raws)
+  assert.equal(fresh.find([t]).length, 1, 'live record restored')
+  assert.equal(await fresh.put(old), 'stale', 'tombstone still blocks the replay')
+})
+
 test('limits per provider', async () => {
   const { store, clock } = await setup({ perProvider: 2 }), a = await identity()
   for (const [i, name] of ['a', 'b', 'c'].entries()) {
