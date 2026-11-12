@@ -1,6 +1,7 @@
 # Rendezvous: Plan v1.0 (frozen scope)
 
-> **Find any peer by its key, from any runtime, and open a WebRTC DataChannel to it: direct, or relayed by another peer.**
+> **Find any peer by its key, from any runtime, and open an encrypted WebRTC DataChannel to it.**
+> The infrastructure introduces. The peers communicate.
 
 ---
 
@@ -8,35 +9,37 @@
 
 Rendezvous does five things and then gets out of the way:
 
-1. **Identity:** an Ed25519 key pair. The public key is the permanent address.
-2. **Anchor book:** every node keeps a scored list of public anchors (the bootstrap nodes) and shares it over every channel it has.
+1. **Identity:** one seed → an Ed25519 identity key (the permanent address) + an X25519 encryption key.
+2. **Anchor book:** every node keeps a verified, scored list of public anchors (the bootstrap nodes) and shares it over every channel it has.
 3. **Discovery:** publish a signed record under your address; anyone can resolve it.
-4. **Signalling:** send small encrypted messages to an address.
-5. **Connection:** `connect(address)` returns an open `RTCDataChannel`, direct when possible, otherwise relayed through a peer's TURN.
+4. **Signalling:** send small, signed and encrypted messages to an address.
+5. **Connection:** `connect(address)` returns an open `RTCDataChannel`. Direct by default. Relayed through another peer's TURN only if the relay policy allows it (§7).
 
 ### Out of scope, permanently
 - Anything on top of the DataChannel (framing, RPC, files, media)
-- Peer gossip, introductions, rooms/topics, reputation, incentives
-- **Our own WebRTC stack.** Browsers have one built in. Node/Bun/Deno pass in any standard `RTCPeerConnection` (e.g. `node-datachannel`, `werift`). Without one, a native node can still do everything except `connect()`.
-- WebSocket, WebTransport, UPnP/NAT-PMP port mapping, running DNS servers, ICMP, pkarr HTTP endpoints, telemetry, crypto fallbacks for old browsers
+- Peer gossip, introductions, rooms/topics, reputation, incentives, telemetry
+- Our own WebRTC stack (browsers have one; native runtimes use a standard library, §8)
+- WebSocket, WebTransport, UPnP/NAT-PMP, running DNS servers, ICMP, pkarr HTTP endpoints, crypto fallbacks for old browsers (unsupported browsers get a clear `unsupported` error)
 
 ### Done when
-- [ ] `npm test` is green under Node and Bun, and the browser tests pass in Chromium, Firefox and WebKit
-- [ ] A Beacon from our code round-trips through the public pkarr relay (proves real Mainline compatibility)
-- [ ] Two browsers on different networks connect knowing only each other's address, both direct and forced through TURN
-- [ ] A fresh node with no configuration finds anchors via HTTP, DNS TXT, the Mainline DHT and the LAN
-- [ ] Every HTTP-reachable node serves the homepage (what it is, how to use it, known anchors)
-- [ ] README written. From then on: bug fixes only.
+- [ ] `npm test` is green under Node, Bun and Deno; browser tests pass in Chromium, Firefox and WebKit
+- [ ] A Beacon from our code round-trips through the public pkarr relay (real Mainline compatibility)
+- [ ] **The proof:** two browsers on unrelated networks, knowing only each other's address, open a verified **direct** DataChannel with TURN disabled
+- [ ] The same with `relay: 'fallback'` forced through TURN; and a Node peer ↔ browser using the default native WebRTC library
+- [ ] A fresh node with no configuration finds anchors via the homepage/HTTP, DNS TXT, the Mainline DHT and the LAN
+- [ ] Every HTTP-reachable node serves the homepage
+- [ ] README + `SPEC.md` written. From then on: bug fixes only.
 
 ---
 
 ## 2. Built to last
 
-- **Only frozen standards:** BitTorrent KRPC (BEP 5, 43, 44), DNS TXT, HTTP/1.1, STUN/TURN (RFC 5389/5766), the W3C WebRTC and WebCrypto APIs, mDNS. None of these are expected to change.
-- **Zero runtime dependencies, no build step.** Plain ESM JavaScript. The browser loads the same files Node runs.
-- **The protocol only grows:** fields and queries never change meaning; new things get new names. Unknown fields are ignored.
-- **Small:** about 1,500 lines, every file under 250 lines, each with one job.
-- **Platforms:** current Chrome, Firefox and Safari (WebCrypto Ed25519/X25519 required); Node ≥ 22, Bun ≥ 1.1. Deno works through its Node compatibility, best effort.
+- **Standard foundations:** BitTorrent KRPC (BEP 5, 43, 44), pkarr records, DNS TXT, HTTP/1.1, STUN/TURN (RFC 5389/5766), mDNS, and the W3C WebRTC and WebCrypto APIs.
+- **Our own protocol on top, versioned as `rv/1`:** the `rv_*` queries, anchor lines, the message format, the anchor book rules and the connect flow. These are specified in `SPEC.md` with test vectors. The protocol only grows: fields and queries never change meaning, new ones get new names, and unknown fields are ignored.
+- **Core has zero runtime dependencies and no build step.** Plain ESM JavaScript; the browser loads the same files Node runs. Native runtimes get one *optional* default WebRTC library (§8).
+- **Standard crypto only:** WebCrypto Ed25519, X25519, HKDF-SHA256, AES-GCM, SHA-1/256. No custom key conversions.
+- **Small but not at the expense of safety.** Target is roughly 1,700 lines; correctness and tests come first.
+- **Platforms:** current Chrome, Firefox, Safari; Node ≥ 22, Bun ≥ 1.1, Deno ≥ 2 (via `npm:rendezvous`).
 
 ---
 
@@ -45,211 +48,257 @@ Rendezvous does five things and then gets out of the way:
 ```
           UDP (KRPC · STUN/TURN)                       HTTP POST /krpc
  Mainline ◄───────────────► ANCHOR ◄──────────────────────────────── any client
- DHT nodes                     ▲ ▲                                   (browser, Node, Bun, curl)
+ DHT nodes                     ▲ ▲                                   (browser, Node, Bun, Deno, curl)
                      UDP KRPC  │ │ LAN: broadcast "RV?" + mDNS
                       ANCHOR ◄─┘ └─► native nodes on the same network
 
- PEER A ◄═════════ RTCDataChannel (direct, or via an anchor's TURN) ═════════► PEER B
+ PEER A ◄═════════════ RTCDataChannel (direct; TURN only if allowed) ═════════════► PEER B
 ```
 
 | Role | Who | Does |
 |---|---|---|
-| **Anchor** | any native node whose UDP+TCP port passes the reachability check | DHT node, HTTP `/krpc`, inboxes, STUN/TURN, anchor book, LAN responder |
-| **Native peer** | Node/Bun behind NAT | client over HTTP; keeps and shares an anchor book; LAN responder |
-| **Browser peer** | any web page | client over HTTPS; keeps and shares an anchor book |
+| **Anchor** | a native node with at least one verified public service (UDP and/or HTTP) | DHT node (if UDP), HTTP `/krpc` + homepage (if HTTP), inboxes, STUN, TURN (if enabled), anchor book, LAN responder |
+| **Native peer** | Node/Bun/Deno behind NAT | HTTP client; keeps and shares an anchor book; LAN responder |
+| **Browser peer** | any web page; **opportunistic**: may sleep or vanish at any time, holds no responsibility for others | HTTPS client; keeps and shares an anchor book |
 
 **Two transports, one message format (bencoded KRPC):**
 - **UDP:** node ↔ node, Mainline, STUN/TURN, LAN discovery.
-- **HTTP `POST /krpc`:** every client ↔ anchor. Body = one query, response = one reply. Browsers need anchors with an HTTPS origin (`web=`); natives can use plain `http://ip:port`.
+- **HTTP `POST /krpc`:** every client ↔ anchor. Browsers need an HTTPS origin (`web=`, e.g. through a Cloudflare tunnel; the tunnel covers HTTP only, not the anchor's UDP DHT/TURN). Natives may use `http://ip:port`.
 
 ---
 
-## 4. Formats
+## 4. Identity, records and messages
 
 ```
-Address   z32(ed25519_pk)                                                      52 chars
-Anchor    rv-anchor:<z32>@<ip>:<port>[;web=<https origin>][;q=<0-100>]         one line, ≤ 255 chars
-Beacon    pkarr signed packet: sig 64 | seq 8 (BE µs) | DNS packet             ≤ 1000 B
-          TXT "_rv" = "c=<anchor http(s) url>"  (1..n: where my inbox is)
-Message   from_pk 32 | iv 12 | AES-GCM_K( ts 8 | bencode(body) ) | tag 16    ≤ 1024 B
-K         HKDF-SHA256( X25519(ed→x(sk), ed→x(pk_peer)), salt = sorted(pk_a ‖ pk_b), "rv/msg" )
-TURN      user = "<expiry>:<z32>", pass = base64(HMAC-SHA1(anchor_secret, user))
+Seed       32 random bytes (the only secret to back up)
+Identity   Ed25519 key  = from HKDF(seed, "rv/ed25519")    → address = z32(ed_pk), 52 chars
+Encryption X25519 key   = from HKDF(seed, "rv/x25519")     → published in the Beacon, signed by the identity key
+Anchor     rv-anchor:<z32>@<ip>:<port>[;web=<https origin>][;q=<0-100>]                 ≤ 255 chars
+Beacon     pkarr signed packet (BEP 44 mutable item at SHA1(ed_pk)), ≤ 1000 B, TXT "_rv":
+           x=<b64 x25519_pk>   c=<inbox anchor url> (1..n)   [app-defined k=v]
+Message    eph_x 32 | iv 12 | AES-GCM_K( inner ) | tag 16                                ≤ 4 KB
+           K     = HKDF-SHA256( X25519(eph_sk, recipient_x), info = "rv/msg" ‖ eph_x ‖ recipient_x )
+           inner = bencode{ from: ed_pk, to: recipient_ed_pk, id: 16 B, ts, body } ‖ Ed25519 sig over all of it
+TURN       user = "<expiry>:<z32>", pass = base64(HMAC-SHA1(anchor_secret, user))
 ```
-- A **Beacon** is a BEP 44 mutable item stored at `SHA1(pk)`. It's pkarr-compatible, so it lives on the real Mainline DHT.
-- **Messages** are accepted only if `|now − ts| < 10 min` and the IV hasn't been seen before. AEAD authenticates the sender.
+- **Sealed sender:** each message uses a fresh ephemeral X25519 key, so a recipient's long-term key alone can't decrypt past messages, and keys are never reused across directions.
+- **Sender attribution comes from the Ed25519 signature,** not from the shared key. The signature covers `to`, which stops reflection and redirection attacks.
+- **Receivers accept a message only if** the signature is valid, `to` is them, `|now − ts| < 10 min`, and the `id` is new. A sender's X25519 key is learned from its Beacon when it's needed (e.g. to reply).
 
 ---
 
-## 5. Protocol (KRPC queries)
+## 5. Protocol `rv/1` (KRPC)
 
 | Query | Source | Request → Reply |
 |---|---|---|
 | `ping`, `find_node` | BEP 5 | routing |
-| `get_peers`, `announce_peer` | BEP 5 | anchors announce on infohash `SHA1("rendezvous anchors v1")`: **Mainline is the global anchor directory** |
+| `get_peers`, `announce_peer` | BEP 5 | anchors announce on infohash `SHA1("rendezvous anchors v1")`. **One opportunistic bootstrap source**, not an authority: results can be stale or hostile and are verified like any other line |
 | `get`, `put` | BEP 44 | resolve / publish a Beacon (signature, seq and token checked) |
-| `rv_hi {n}` | ours | → `{k, sig=Ed25519(n), web?}`: proves the anchor holds the key in its anchor line |
+| `rv_hi {n}` | ours | → `{k, sig=Ed25519("rv-hi" ‖ n), web?}`: proves the anchor holds its key (identity only, says nothing about reachability) |
 | `rv_anchors {}` | ours | → `{a}`: best 32 + 8 random anchor lines |
-| `rv_check {port}` | ours | the anchor asks a *different* anchor to `rv_hi` the caller → `{reachable}` |
-| `rv_send {to, msg}` | ours | → `{ok}`: queue for that address (2 min, ≤ 64 per address) |
-| `rv_listen {k, ts, sig}` | ours | **long poll**: waits ≤ 25 s → `{msgs: [...]}`. `sig` = Ed25519(`"rv-listen:" ‖ ts`), ±5 min |
-| `rv_turn {k, ts, sig}` | ours | → `{user, pass, ttl, urls}` for this anchor's TURN |
+| `rv_check {port}` | ours | the anchor asks a *different* anchor to probe the caller's UDP and HTTP → `{udp, http}` |
+| `rv_send {to, msg}` | ours | → `{queued}`: stored for that address (2 min, ≤ 64 per address, dedup by message `id`, so retries are idempotent). *Queued ≠ delivered*; delivery is only known when the peer answers |
+| `rv_listen {k, ts, sig, after?}` | ours | **long poll**, waits ≤ 25 s → `{msgs: [{seq, msg}]}`. `after` acknowledges everything up to that `seq`, which the anchor then deletes (at-least-once delivery; receivers dedup by `id`). A newer poll for the same key ends the older one with an empty reply |
+| `rv_turn {k, ts, sig}` | ours | → `{user, pass, ttl, urls}` (only if the anchor runs TURN) |
 
-**Anchor HTTP endpoints:** `GET /` (homepage, below; it is also the anchor list) · `POST /krpc` · `GET /rv/*.js` (the library) · `GET /demo` (two-tab chat demo). CORS `*` on everything.
+**HTTP details:**
+- **Requests:** `POST /krpc` with `Content-Type: text/plain` (a CORS "simple request", so browsers send no preflight). `OPTIONS` is still answered. Body ≤ 8 KB.
+- **Every reply is a KRPC reply**, including errors.
+- **Clients retry** with backoff, and the same `t` (transaction id) is answered from a short replay cache, so a retried `POST` never executes twice.
+
+**Anchor HTTP endpoints:** `GET /` (homepage = anchor list) · `POST /krpc` · `GET /rv/*.js` (the library) · `GET /demo`. CORS `*` everywhere.
 
 ### The homepage (`GET /`)
-Every node reachable over HTTP serves a thin page, so anyone who stumbles on an anchor's address learns what it is and how to join.
-- **Content, in this order:**
-  1. **What this is:** two sentences ("A Rendezvous anchor: it helps peers find each other by key and open direct WebRTC connections. It stores nothing but signed address records and short-lived encrypted messages.")
-  2. **This node:** its own anchor line, its uptime, and whether it is an anchor or a plain node
-  3. **How to use it:**
-     - browser: `import { Peer } from '<this origin>/rv/index.js'`
-     - native: `npx rendezvous node`
-     - list: `curl -s <this origin> | grep -o 'rv-anchor:[^ <]*'`
-     - plus links to `/demo` and the repo
-  4. **Known anchors:** the book's shared view (best 32 + 8 random), one anchor line per row with its score, inside a `<pre>`
-- **Rules:**
-  - server-rendered from one template string, **no JavaScript, no external requests** (no fonts, images or CDNs)
-  - ≤ 10 KB, with a system font
-  - dark and light mode via `prefers-color-scheme`
-  - readable on a phone
-  - all dynamic values HTML-escaped
-- **It is the anchor list:** the anchor lines appear verbatim, so the page itself is a valid `sources` URL and a greppable channel (§6). There is no separate `/anchors.txt` endpoint; machines use `rv_anchors`.
+Every node reachable over HTTP serves a thin page, so anyone who stumbles on it learns what it is and how to join.
+1. **What this is:** two sentences ("A Rendezvous anchor: it helps peers find each other by key and open direct WebRTC connections. It stores nothing but signed address records and short-lived encrypted messages.")
+2. **This node:** its anchor line, which services it offers (UDP/HTTP/TURN), and its uptime
+3. **How to use it:**
+   - browser: `import { Peer } from '<origin>/rv/index.js'`
+   - native: `npx rendezvous node`
+   - shell: `curl -s <origin> | grep -o 'rv-anchor:[^ <]*'`
+   - plus links to `/demo` and the repo
+4. **Known anchors:** the shared view, one anchor line per row with its score, in a `<pre>`
+
+Rules:
+- server-rendered from one template string, **no JavaScript, no external requests**
+- ≤ 10 KB, system font, dark and light mode, readable on a phone
+- every dynamic value HTML-escaped
+- **it is the anchor list:** there's no `/anchors.txt` endpoint, and machines use `rv_anchors`.
 
 ---
 
 ## 6. The anchor book
 
-**Line:** `rv-anchor:<z32>@203.0.113.7:4799;web=https://a.example.org;q=93`
-- **Greppable:** readers scan any text for `rv-anchor:[^\s"'<]+`. Web pages, READMEs, gists, DNS TXT records, invite links and pasted text all work as sources with zero code.
-- **Verified before use:** a line is a claim. A node sends `rv_hi` with a random nonce, and only a valid signature makes the anchor *verified*.
-- **Scored locally:** `ok = EWMA(probe success, α=0.2)`, `q = round(100 · ok · min(1, days_known/7)^½)`. A `q` received from others is only a hint (counted as at most 50 until verified).
-- **Kept tidy:** ≤ 1000 entries; dropped when `q < 10` and no success for 7 days. Anchors re-probe 64 entries every 10 min.
-- **Shared as:** best 32 + 8 random, so new anchors spread before they have a score.
+**Line:** `rv-anchor:<z32>@203.0.113.7:4799;web=https://a.example.org;q=93`. Readers grep any text for `rv-anchor:[^\s"'<]+`. Web pages, READMEs, gists, DNS TXT records, invite links and pasted text all work as sources with no extra code.
 
-**Spreading:** every 10 min each anchor pulls `rv_anchors` from 3 random anchors in its book. Clients pull from every anchor they use. New anchors `announce_peer` on Mainline and send `rv_hi` to the anchors they know (which probe back).
+**Each entry tracks every service separately**, so a working HTTPS tunnel can't make a dead DHT port look healthy:
+```
+identity_verified   rv_hi signature valid (with a random nonce)
+http_ok / udp_ok / turn_ok    EWMA(probe success, α = 0.2) per service
+rtt, first_seen, last_ok
+```
+- **Score:** `q = round(100 · max(service ok) · min(1, days_known/7)^½)`. Browsers rank by `http_ok`, natives by `udp_ok` (falling back to `http_ok`). A `q` received from others is only a hint, capped at 50 until verified locally.
+- **Size and pruning:** ≤ 1000 entries; dropped when `q < 10` and no success for 7 days. Anchors re-probe 64 entries every 10 min (≤ 16 unverified probes per minute).
+- **Shared view:** best 32 + 8 random (so new anchors spread before they have a score).
+- **Spreading:** every 10 min each anchor pulls `rv_anchors` from 3 random anchors. Clients pull from every anchor they use. New anchors `announce_peer` and send `rv_hi` to known anchors, which probe back.
 
-**Bootstrap channels** (all tried in parallel, first verified anchor wins):
+**Bootstrap channels** (all tried in parallel, the first verified anchor wins):
 
 | Channel | Browser | Native |
 |---|---|---|
 | Local cache (IndexedDB / `~/.config/rv/anchors.txt`) | ✅ | ✅ |
-| Baked-in `anchors.txt` file (shipped in the package / repo) | ✅ | ✅ |
-| Any text: invite link, paste, file, any URL (`sources: [...]`), including any anchor's homepage | ✅ (HTTPS + CORS) | ✅ |
-| `GET /` (homepage) / `rv_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
+| Baked-in `anchors.txt` file (in the package / repo) | ✅ | ✅ |
+| Any text: invite link, paste, file, any URL incl. any anchor's homepage (`sources: [...]`) | ✅ (HTTPS + CORS) | ✅ |
+| `rv_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
 | DNS TXT `_rv-anchors.<domain>` (`dohDomains: [...]`) | ✅ via public DoH JSON | ✅ via system resolver |
 | Mainline `get_peers` on the anchor infohash | ❌ | ✅ |
 | LAN: UDP broadcast/multicast `RV?` on port 4799, mDNS `_rv._udp.local` TXT | ❌ | ✅ (every native node answers) |
 
-**Automatic promotion:** every native node calls `rv_check` at start and every 30 min. If it's reachable from a stranger, it becomes an anchor: DHT server mode, TURN on, `announce_peer`. `--no-anchor` opts out. Hosts with a public IPv4, IPv6 or a manual port forward qualify. Browsers can't be anchors, but they share their book (invite links, `me.anchors()`).
+**Automatic promotion:** every native node calls `rv_check` at start and every 30 min. Each service that strangers can reach is switched on: UDP → DHT server mode, STUN, `announce_peer`, TURN if `--turn`; HTTP → homepage and `/krpc` for others. `--no-anchor` opts out.
 
 ---
 
-## 7. `connect(address)`
+## 7. `connect(address, { relay })`
 
+Plain standard offer/answer. **No SDP templates and no SDP editing.**
 ```
-1 RESOLVE  Beacon of B (newest valid seq) → B's inbox anchors (c=)
-2 RELAYS   rv_turn on own anchors → iceServers = STUN + TURN on own anchors
-3 OFFER    A → B  msg {t:'rtc', sid, ufrag, pwd, fp}          A builds B's remote SDP from a template after step 4
-4 ANSWER   B → A  msg {t:'rtc-ok', sid, ufrag, pwd, fp}       B builds A's offer from the same template
-5 ICE      both trickle msg {t:'rtc-c', sid, c}; ICE prefers host/srflx, falls back to TURN
-6 OPEN     negotiated DataChannel id 0 opens → { channel, pc, kind: 'direct' | 'turn' }
-Errors:    'not-found' | 'no-answer' | 'ice-failed' | 'timeout' | 'no-webrtc'
+1 RESOLVE  Beacon of B (newest valid seq) → B's x25519 key + inbox anchors
+2 ICE      iceServers = STUN on own anchors (+ TURN from rv_turn if relay ≠ 'never')
+3 OFFER    A: createOffer → setLocalDescription → msg {t:'offer', sid, sdp}
+4 ANSWER   B: setRemoteDescription → createAnswer → setLocalDescription → msg {t:'answer', sid, sdp}
+5 TRICKLE  both send msg {t:'cand', sid, c} as candidates appear; candidates that arrive early are queued
+6 VERIFY   getStats(): kind = 'direct' | 'turn'. With relay = 'never', a relayed pair → close + error
+7 OPEN     negotiated DataChannel (id 0) open → { channel, pc, kind }
+Errors:    'not-found' | 'no-answer' | 'ice-failed' | 'relayed' | 'timeout' | 'no-webrtc' | 'unsupported'
 ```
-- **No SDP on the wire and no SDP editing:** each side reads its own ufrag/pwd/fingerprint from its local SDP, sends them in a message, and builds the remote SDP from a 15-line template.
-- **Identity is implicit:** only the holder of the address's key can read and answer the `rtc` message, and fingerprints arrive inside authenticated messages, so the DTLS channel is bound to both keys.
+- **Relay policy:** `relay: 'never' | 'fallback'`, with **default `'never'`** (no conversation relays unless the app opts in). Apps that want "always connects" set `'fallback'`. TURN is used only then, and only if an anchor offers it.
+- **Identity binding:** offer and answer travel inside signed, encrypted messages, so each DTLS fingerprint is bound to the sender's Ed25519 key. Nobody else can inject or swap an SDP.
+- **A whole SDP is ~0.6–1.5 KB.** That's why the message cap is 4 KB.
 
 ---
 
-## 8. Limits enforced in code
+## 8. WebRTC outside browsers: a default you can replace
 
-- **Records:** Beacon signature + monotonic seq + ≤ 1000 B, checked on store and on use. Messages ≤ 1024 B, AEAD, ts window, IV dedup.
-- **Per IP, one token bucket** (cost per query: `put` 6, `rv_check` 12, `rv_turn` 6, `rv_send` 1, others 0.5; refill 60/min). HTTP body ≤ 4 KB.
+```js
+// resolution order inside Peer.create():
+RTCPeerConnection = options.RTCPeerConnection          // 1. injected by the app (always wins)
+                 ?? globalThis.RTCPeerConnection        // 2. browsers (and any runtime that adds it)
+                 ?? (await import('werift')).RTCPeerConnection   // 3. the default for Node/Bun/Deno
+                 ?? null                                // 4. none → connect() throws 'no-webrtc'; everything else works
+```
+- **Default: `werift`.** It's pure TypeScript and MIT-licensed, with no native binaries, so it runs unchanged on Node, Bun and Deno. It's listed as an **`optionalDependency`**: installed by default, and if it's missing the install doesn't fail and everything except `connect()` still works.
+- **Tested alternative: `node-datachannel`** (libdatachannel, native, faster), e.g. `Peer.create({ RTCPeerConnection: (await import('node-datachannel/polyfill')).RTCPeerConnection })`.
+- **The contract, the minimum interface we use** (documented in `SPEC.md`; any implementation that satisfies it works):
+  - `new RTCPeerConnection({ iceServers, iceTransportPolicy })`
+  - `createDataChannel(label, { negotiated: true, id: 0 })`
+  - `createOffer()`, `createAnswer()`, `setLocalDescription(d)`, `setRemoteDescription(d)`, `addIceCandidate(c)`, `getStats()`, `close()`
+  - events: `onicecandidate`, `onconnectionstatechange` / `connectionState`
+  - channel: `send`, `close`, `readyState`, `binaryType`, `onopen`, `onmessage`, `onclose`
+- **Our tests run against both libraries.** If `werift` ever goes unmaintained, the default moves to `node-datachannel` with no API change.
+
+---
+
+## 9. Limits enforced in code
+
+- **Beacon:** signature, monotonic seq, ≤ 1000 B, checked on store and on use.
+- **Message:** ≤ 4 KB, signature, `to`, ts window, id dedup.
+- **Per IP, one token bucket** (cost: `put` 6, `rv_check` 12, `rv_turn` 6, `rv_send` 1, others 0.5; refill 60/min). HTTP body ≤ 8 KB; ≤ 4 open long polls per IP.
 - **DHT:** tokens = SHA1(secret ‖ ip), rotated every 10 min; routing table ≤ 1000; responders added only after they answer.
-- **Book:** lines ≤ 255 chars, public unicast IPs only (except those learned on the LAN), ≤ 16 unverified probes per minute.
-- **TURN:** 10-min allocations, ≤ 4 per key, ≤ 1 Mbit/s and 500 MB each.
+- **Book:** lines ≤ 255 chars; public unicast IPs only (except entries learned on the LAN).
+- **TURN (opt-in `--turn`):**
+  - 10-min allocations, ≤ 4 per key, ≤ 1 Mbit/s and 500 MB each
+  - **never relays to private, loopback or link-local addresses** (no reaching into the anchor's LAN)
 
 ---
 
-## 9. Files (~1,550 lines)
+## 10. Files (~1,700 lines)
 
 | File | Job | Lines | Draft? |
 |---|---|---|---|
 | `src/bytes.js` | hex, base64url, z-base32, u64, concat | 45 | ✅ |
-| `src/crypto.js` | WebCrypto: Ed25519, X25519, ed→x, HKDF, AES-GCM, SHA-1 | 55 | ✅ |
+| `src/crypto.js` | WebCrypto: keys from seed, sign/verify, ECDH, HKDF, AES-GCM, hashes | 55 | ✏️ drop ed→x |
 | `src/bencode.js` | bencode (hardened) | 45 | ✅ |
 | `src/record.js` | Beacon, BEP 44 signable, DNS TXT codec (also used by mDNS) | 80 | ✅ |
+| `src/message.js` | sealed-sender seal/open | 60 | ⬜ |
 | `src/dht.js` | sans-IO KRPC node: routing, lookup, get/put, get_peers/announce_peer, query hooks | 200 | ✏️ |
-| `src/book.js` | anchor lines: grep, format, score, merge, probe queue | 140 | ⬜ |
-| `src/peer.js` | `Peer`: identity, book, HTTP client, publish/resolve/send/listen | 170 | ✏️ |
-| `src/rtc.js` | `connect`/`accept` over any `RTCPeerConnection` | 90 | ✏️ |
-| `src/anchor.js` | UDP demux, HTTP server, inboxes, `rv_*` handlers, token bucket | 200 | ✏️ |
-| `src/home.js` | homepage template (escaped, no JS, ≤ 10 KB) | 50 | ⬜ |
-| `src/turn.js` | STUN binding + TURN server subset | 200 | ⬜ |
+| `src/book.js` | anchor lines: grep, format, per-service scores, merge, probe queue | 160 | ⬜ |
+| `src/peer.js` | `Peer`: identity, book, HTTP client (retries, long poll, acks), publish/resolve/send | 180 | ✏️ |
+| `src/rtc.js` | `connect`/`accept`: offer/answer/trickle, relay policy, `kind` via getStats | 110 | ✏️ |
+| `src/anchor.js` | UDP demux, HTTP server, inboxes, `rv_*` handlers, token bucket, replay cache | 220 | ✏️ |
+| `src/home.js` | homepage template | 50 | ⬜ |
+| `src/turn.js` | STUN binding + TURN server (UDP, long-term auth, allocate/refresh/permission/channel-bind/send/data), quotas | 300 | ⬜ |
 | `src/lan.js` | broadcast/multicast + mDNS responder and query | 100 | ⬜ |
-| `src/node.js` | native wiring: UDP socket, book file, LAN, DNS lookup, promotion | 90 | ⬜ |
+| `src/node.js` | native wiring: UDP socket, book file, LAN, DNS lookup, promotion, default WebRTC loader | 100 | ⬜ |
 | `bin/rv.js` | `rv node \| anchor \| anchors \| id \| resolve` | 50 | ✏️ |
-| `src/demo.html` · `anchors.txt` | two-tab chat demo (served at `/demo`) · baked-in list | 60 | ✏️ |
+| `src/demo.html` · `anchors.txt` | two-tab chat demo at `/demo` · baked-in list | 60 | ✏️ |
 
 ---
 
-## 10. API (all of it)
+## 11. API (all of it)
 
 ```js
-import { Peer } from 'rendezvous'                 // browsers: import from https://<anchor>/rv/index.js
+import { Peer } from 'rendezvous'                 // browsers: https://<anchor>/rv/index.js · Deno: npm:rendezvous
 
 const me = await Peer.create({
   seed,                                           // optional; persisted by the caller
   anchors, sources, dohDomains,                   // optional extra bootstrap inputs
-  RTCPeerConnection                               // optional outside browsers
+  RTCPeerConnection,                              // optional: overrides the default (§8)
+  relay: 'never'                                  // or 'fallback'
 })
 me.address                                        // permanent, shareable
 await me.publish()                                // Beacon → DHT, refreshed every 30 min
-me.accept(({ from, channel }) => {})              // incoming DataChannels
-const { channel, kind } = await me.connect(address)
+me.accept(({ from, channel, kind }) => {})        // incoming DataChannels
+const { channel, kind } = await me.connect(address, { relay })
 
 me.anchors()  /  me.addAnchors(text)              // export / import anchor lines
 await me.resolve(address)                         // Beacon fields
-await me.send(address, body);  me.on(fn)          // raw encrypted messages
+await me.send(address, body);  me.on(fn)          // raw signed + encrypted messages
 me.close()
 ```
-CLI: `rv node` (peer that promotes itself), `rv anchor` (forced anchor), `rv anchors` (print book), `rv id`, `rv resolve <addr>`.
+CLI: `rv node` (a peer that promotes itself), `rv anchor [--turn]`, `rv anchors`, `rv id`, `rv resolve <addr>`.
 
 ---
 
-## 11. Tests
+## 12. Tests
 
 | Test | Proves |
 |---|---|
-| `core` | encodings round-trip; truncated bencode can't hang; ed→x equals the derived X25519 key; Beacon and message tamper/replay rejected; anchor lines grepped from messy text; score maths |
+| `core` | encodings round-trip; truncated bencode can't hang; seed → same keys everywhere; Beacon tamper; message tamper, **reflection**, redirection (`to`) and replay rejected; anchor lines grepped from messy text; score maths |
 | `dht` | 20 loopback nodes: put/get, stale seq + bad signature rejected, announce_peer → get_peers |
-| `book` | 10 anchors, each knowing one neighbour, converge to all 10; a line with the wrong key is never verified; a dead anchor's score decays |
-| `home` | `GET /` returns HTML ≤ 10 KB with no `<script>` and no external URLs; contains this node's anchor line and the shared anchor lines; a book line containing `<script>` comes out escaped; grepping the page with `addAnchors()` recovers every listed anchor |
-| `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves and sends, A's long poll receives; `rv_check` promotes reachable nodes only; token bucket triggers |
-| `turn` | allocate → permission → data via the relay; bad credentials and quotas enforced |
-| `lan` | broadcast and mDNS discovery between two nodes on loopback/multicast |
-| `browser` | Playwright **Chromium, Firefox, WebKit**: two pages bootstrap from an anchor's homepage (`sources: [origin]`), connect direct, then forced relay (`iceTransportPolicy: 'relay'` → `kind: 'turn'`) |
+| `book` | 10 anchors, each knowing one neighbour, converge to all 10; a wrong-key line is never verified; an anchor with HTTP up but UDP dead scores well for browsers only; a dead anchor decays |
+| `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves and sends, A's long poll receives; retried POST not executed twice; `after` acks delete; newer poll ends the older one; `rv_check` turns on only reachable services; token bucket |
+| `home` | `GET /` ≤ 10 KB, no `<script>`, no external URLs, escapes a hostile line, `addAnchors(page)` recovers every listed anchor |
+| `turn` | Chromium with `iceTransportPolicy: 'relay'` connects through our TURN; bad credentials, quotas and private-address peers rejected |
+| `lan` | broadcast and mDNS discovery between two nodes |
+| `browser` | Playwright **Chromium, Firefox, WebKit**: two pages bootstrap from an anchor homepage, connect **direct with relay 'never'** (`kind: 'direct'`), then forced relay with `'fallback'` (`kind: 'turn'`); `'never'` + relay-only ICE → `'relayed'`/`'ice-failed'` error |
+| `native` | Node ↔ Chromium and Node ↔ Node with **werift** and with **node-datachannel**; Bun and Deno run `core`, `anchor` and Node ↔ Node with werift |
 | `live` (manual) | Beacon via `relay.pkarr.org`; TXT via public DoH; `announce_peer` on real Mainline |
 
 ---
 
-## 12. Build order
+## 13. Build order
 
-1. `dht.js` hooks + get_peers/announce_peer → `core`, `dht`
-2. `book.js` + `rv_hi`/`rv_anchors` → `book`
-3. `anchor.js` HTTP `/krpc` + long poll + inboxes, `peer.js` HTTP client → `anchor`
-4. `turn.js`, `rtc.js` → `turn`, `browser`
-5. `lan.js`, `node.js` (promotion, DNS, cache) → `lan`, promotion part of `anchor`
-6. `home.js`, CLI, demo, `anchors.txt`, `live` run, README. **Done.**
+1. `crypto` (seed → keys), `message`, `dht` hooks + get_peers/announce_peer → `core`, `dht`
+2. `book` + `rv_hi`/`rv_anchors` → `book`
+3. `anchor` (HTTP `/krpc`, long poll, acks, replay cache, inboxes) + `peer` HTTP client + `home` → `anchor`, `home`
+4. `rtc` (standard offer/answer, relay policy) → `browser` direct
+5. `turn` → `turn`, `browser` relayed
+6. `node` (default WebRTC loader, promotion, DNS, cache) + `lan` → `native`, `lan`
+7. CLI, demo, `anchors.txt`, `live` run, README + `SPEC.md`. **Done.**
 
 ---
 
-## 13. Cut in this revision, and why
+## 14. Decisions taken in review (and why)
 
-| Cut | Lines saved | Reason |
-|---|---|---|
-| Own WebRTC subset (ICE/DTLS/SCTP/X.509) + its fallbacks + Safari WebDriver CI | ~1,900 | Biggest maintenance burden: it has to track browser TLS stacks for years. Browsers have WebRTC built in; natives plug in any standard implementation. |
-| WebSocket transport | ~150 | `HTTP POST /krpc` with long polling covers every runtime with one code path |
-| SDP editing / derived ICE credentials | ~20, plus a risk | Browsers may block editing. Sending the real credentials costs about 40 bytes and is fully standard |
-| UPnP / NAT-PMP / PCP | ~100 | Router quirks mean endless fixes. Promotion works for public IPv4, IPv6 and manual forwards |
-| DNS server, DoH endpoint, ICMP | ~80 | Reading DNS TXT is enough; publishing is the domain owner's job (`rv anchors` → zone records) |
-| pkarr relay endpoints, `/stats` telemetry, pure-JS crypto fallback | ~280 | Redundant (`/krpc` covers them), not needed, or obsolete (all current browsers have Ed25519/X25519) |
+| Change | Why |
+|---|---|
+| **Separate X25519 key** (from the same seed) instead of converting Ed25519 → X25519 | Uses only standard WebCrypto operations. The key is published in the Beacon, which we always resolve anyway. |
+| **Sealed-sender messages:** ephemeral ECDH + Ed25519 signature over `to` | The old shared static key couldn't prove who sent a message and allowed reflecting a message back to its sender. Now sender attribution is explicit and keys are never reused across directions. |
+| **Full SDP offer/answer**, no templates | Robust across Chrome, Firefox, Safari and native libraries. Costs ~1 KB per connection, so the message cap goes up to 4 KB. |
+| **Relay default `'never'`**, TURN opt-in (`relay: 'fallback'`, `rv anchor --turn`) | "Direct only" is the safe default; apps that want peer relays turn them on. |
+| **TURN sized honestly at ~300 lines**, with private-address blocking | A UDP-only, WebRTC-only subset of a frozen RFC, tested against Chromium's strict TURN client. Anchors that don't want to relay simply don't pass `--turn`. |
+| **Mainline `get_peers` is one bootstrap source, not "the directory"** | Its results can be stale or hostile. The verified anchor book is the foundation. |
+| **Separate identity and per-service reachability** in the book | A working HTTPS tunnel must not make a dead UDP/DHT port look healthy. |
+| **Idempotent HTTP:** retry cache, message ids, acked long polls, `text/plain` POST | Retries never execute twice, nothing is silently lost, and browsers send no CORS preflight. |
+| **Default native WebRTC = `werift`** (optional dependency), injectable | Pure JS on Node, Bun and Deno; replaceable without API changes. |
+| **No hard line limit** | Safety and tests matter more than the line count. |
