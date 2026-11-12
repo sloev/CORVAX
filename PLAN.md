@@ -46,9 +46,10 @@ Offline peers can't renew leases or answer. **An unexpired lease is evidence of 
 - [x] A Beacon round-trips through the public pkarr relay (`node test/live/pkarr.js`)
 - [x] Two browsers connect directly and through a third peer; Node ↔ browser works with the default WebRTC library
 - [x] Every HTTP-reachable node serves the homepage / plain anchor list
-- [ ] Topic presence and broadcast implemented and tested as in §§8–9 and §15
+- [x] Topic presence and broadcast implemented and tested as in §§8–9 and §15
+- [x] The homepage is a live demo and query tool (`app.js`, logo inlined)
 - [ ] Two browsers on two real networks; live Mainline DHT run (need an environment with outbound UDP)
-- [ ] README + `SPEC.md` describe topics. From then on: bug fixes only.
+- [x] README + `SPEC.md` describe topics. From then on: bug fixes only.
 
 ---
 
@@ -125,11 +126,20 @@ Messages are accepted only if they decrypt, the signature verifies, `to` is the 
 
 **HTTP:** `POST /krpc`, `Content-Type: text/plain` (no CORS preflight), body ≤ 8 KB. Every reply is KRPC, including errors. A repeated `t` from the same IP within 60 s gets the cached reply, so retries are idempotent.
 
-**HTTP endpoints:** `GET /` (homepage for browsers, plain anchor lines for everything else, `Vary: Accept`) · `POST /krpc` · `GET /cx/*.js` · `GET /logo` · `GET /favicon.ico` · `GET /demo`. CORS `*`.
+**HTTP endpoints:** `GET /` (homepage for browsers, plain anchor lines for everything else, `Vary: Accept`) · `POST /krpc` · `GET /cx/*.js` (the library and `app.js`) · `GET /favicon.ico`. CORS `*`.
 
 ### The homepage (`GET /`)
-- **Content (browsers):** the logo and name; what this node is (two sentences); its anchor line, services (UDP/HTTP/relay/storage) and uptime; how to use it (browser import, `npx corvax node`, `curl -s <origin>`, links to `/demo` and the repo); known anchors in a `<pre>`.
-- **Rules:** one template, no JavaScript, no external requests (only the same-origin `/logo`, 2.9 KB), ≤ 10 KB, dark and light mode, readable on a phone, every value HTML-escaped.
+- **Browsers get a shell (< 1 KB):**
+  - `<script type="module" src="/cx/app.js">`, then `<pre id="anchors">` with the anchor lines verbatim (readable and greppable without JavaScript)
+  - the node's line, services, uptime and origin as `data-*` attributes on `<body>`
+  - every value HTML-escaped
+- **`app.js` (≈ 13 KB, same-origin, no external requests):**
+  - renders the human page: the logo **inlined** as a data URI (so there's no `/logo` endpoint), what the node is, this node, how to use it, and the known anchors
+  - a **"Go live"** button loads the library only on click, creates a peer in the tab (seed in `localStorage`, exposed as `window.corvax` for devtools) and turns the page into a demo and query tool:
+    - **Messages:** send and receive
+    - **Connect:** a DataChannel chat, direct or relayed
+    - **Topics:** search, publish/unpublish, subscribe (presence + broadcasts), broadcast
+  - dark and light mode, readable on a phone
 - **Everything else** (`curl`, `wget`, scripts, `fetch()`) gets `text/plain`: own line first, then the shared view, one anchor line per line. There's no `/anchors.txt`.
 
 ---
@@ -343,6 +353,8 @@ me.close()                                        // closes all topics too
 ```
 CLI: `corvax node | anchor | anchors | id | resolve <addr>`; `--no-relay`, `--no-storage`.
 
+Publishing or subscribing to a topic also publishes the peer's Beacon if it hasn't been yet: other members must be able to resolve you to connect.
+
 ---
 
 ## 13. Files
@@ -357,7 +369,8 @@ CLI: `corvax node | anchor | anchors | id | resolve <addr>`; `--no-relay`, `--no
 | `src/dht.js`, `book.js` | DHT; anchor book (+ `storage` flag) |
 | `src/peer.js`, `rtc.js`, `relay.js` | Peer API; connections (+ `topic` purpose, `busy`); relaying |
 | `src/anchor.js`, `node.js`, `stun.js`, `lan.js`, `home.js` | anchor services (+ `cx_tpub`/`cx_tfind`/`cx_twatch`); native wiring; STUN; LAN; homepage |
-| `bin/corvax.js`, `src/demo.html`, `src/anchors.js`, `assets/logo/` | CLI, demo, built-in anchors, logo |
+| `src/app.js` | the homepage app: page, inlined logo, live demo and query tool |
+| `bin/corvax.js`, `src/anchors.js`, `assets/logo/` | CLI, built-in anchors, logo sources (favicon served from here) |
 
 ---
 
@@ -384,6 +397,7 @@ CLI: `corvax node | anchor | anchors | id | resolve <addr>`; `--no-relay`, `--no
 | `native` | Node ↔ Node with werift and node-datachannel |
 | `relay` | relaying through an anchor; ciphertext only; forged bridge; limits; `relay: 'never'` |
 | `browser` | Chromium: direct, through a third browser, Node ↔ browser; **browser publishes a topic, a Node peer finds it and broadcasts to it** |
+| `app` | the homepage as a person uses it: inlined logo, anchors, Go live in two tabs, topic publish/search/subscribe, presence, broadcast between tabs, a message; no page errors |
 | `topic` (unit) | normalization; id stability; record and frame tamper; wrong-topic record; oversize |
 | `store` (unit, fake clock) | ok/dup/stale/bad/expired/future; tombstone blocks replay; expiry and sweep; limits; find returns only live; watch: snapshot without cursor, delta with cursor, coalescing window, epoch change and trimmed log → snapshot, timeout, abort |
 | `topics` (integration, 6 storage nodes, Node peers) | replication to exactly the 5 closest; search finds providers; renewal keeps a provider recent past one lease; offline provider expires; unpublish → `expired` event; storage node killed → search still works and renewal re-replicates; clock skew corrected; cursor loss → snapshot; one long poll per node for many topics; `close()` leaves no timers or polls |

@@ -82,7 +82,7 @@ Every transport carries the same bencoded KRPC dictionaries: `{t, y:"q", q, a}`,
 - A repeated transaction id `t` from the same IP within 60 s gets the cached reply. This makes retries idempotent.
 
 `GET /` on any HTTP-reachable node:
-- When the `Accept` header contains `text/html`, the response is the homepage (HTML, which also contains the anchor lines verbatim).
+- When the `Accept` header contains `text/html`, the response is a small HTML shell: one `<script type="module" src="/cx/app.js">` (the human page, demo and query tool; it inlines the logo), then `<pre id="anchors">` with the anchor lines verbatim.
 - Otherwise it is `text/plain`: the node's own anchor line first (if it is an anchor), then its shared view, one line each.
 - Responses carry `Vary: Accept`. This is the simplest way for any client to fetch an anchor list.
 
@@ -97,12 +97,15 @@ Error codes: 201 generic · 202 rate limited · 203 protocol · 204 unknown meth
 | `ping`, `find_node` | BEP 5 | |
 | `get_peers`, `announce_peer` | BEP 5 | anchor directory: info_hash = `SHA1("corvax anchors v1")` |
 | `get`, `put` | BEP 44 | Beacons |
-| `cx_hi` | `{n: ≤64 bytes}` → `{k: ed_pub, sig, line?}` | `sig = Ed25519("cx-hi" ‖ n)`. Proves identity only |
+| `cx_hi` | `{n: ≤64 bytes}` → `{k: ed_pub, sig, line?, st?}` | `sig = Ed25519("cx-hi" ‖ n)`. Proves identity only. `st: 1` = storage node (§10) |
 | `cx_anchors` | `{me?: anchor line}` → `{a: text}` | `a` is the responder's own line plus its best 32 and 8 random lines, newline-separated. `me` introduces the caller |
 | `cx_check` | `{k, port?, hport?}` → `{udp, http, ip, by}` | "can strangers reach me?" The anchor asks a *different* anchor (`cx_probe`) when it can; `by` is that anchor's key or `"self"`. `ip` is the caller's address as seen |
 | `cx_probe` | `{ip, port, hport, k}` → `{udp, http}` | anchor-to-anchor only (callers must be verified anchors). Sends `cx_hi` to `ip:port` over UDP and to `http://ip:hport` |
 | `cx_send` | `{to: ed_pub, msg: message}` → `{queued: 1}` | stored ≤ 120 s, ≤ 64 per key, deduplicated by SHA-256(msg). *Queued* is not *delivered* |
 | `cx_listen` | `{k, ts, sig, after?}` → `{msgs: [{seq, msg}]}` | HTTP only. `sig = Ed25519("cx-listen:" ‖ ts)` within ±300 s. Messages with `seq ≤ after` are deleted (acknowledged). Waits ≤ 25 s when empty; a newer poll for the same key ends the older one with `[]` |
+| `cx_tpub` | `{r: [record]}` → `{ok: [status], now}` | ≤ 32 provider records (§10.2); status per record: `ok`, `dup`, `stale`, `expired`, `future`, `full`, `bad` |
+| `cx_tfind` | `{t: [topic id]}` → `{r: [record], now}` | ≤ 16 ids; live records only, ≤ 100 per topic, newest first |
+| `cx_twatch` | `{t: [topic id], c?}` → `{c, r: [record], snap?, now}` | HTTP only; ≤ 64 ids; long poll (§10.3) |
 
 ---
 
@@ -135,11 +138,12 @@ Every connection is a standard WebRTC peer connection with two pre-negotiated Da
 ### 7.1 Direct
 Message bodies (§3.3), sent to the peer's inbox anchors (`c=` lines of its Beacon):
 ```
-{cx:"offer",  sid, sdp, p: "app" | "relay"}     full SDP from createOffer/setLocalDescription
+{cx:"offer",  sid, sdp, p: "app" | "relay" | "topic", tp?}     full SDP; tp = topic id (hex) for p = "topic"
 {cx:"answer", sid, sdp}
+{cx:"busy",   sid}                              the callee declines a relay or topic offer
 {cx:"cand",   sid, c, m, i}                     candidate, sdpMid, sdpMLineIndex (may arrive before the offer)
 ```
-`sid` is `b64(9 random bytes)`. `p: "relay"` asks for a connection used only for relaying, which is not surfaced to the application.
+`sid` is `b64(9 random bytes)`. `p: "relay"` asks for a connection used only for relaying; `p: "topic"` for a topic neighbour link (§10.4). Neither is surfaced to the application. `{cx:"via?"}` (§7.2) carries the same `p` and `tp`.
 
 ### 7.2 Through a third peer
 ```
@@ -166,7 +170,8 @@ type   0 = text, 1 = binary
 
 | What | Limit |
 |---|---|
-| Anchor HTTP, per IP | token bucket (burst 120, 4 per second); costs `put` 6, `cx_check` 12, `cx_send` 1, `get`/`get_peers` 1, others 0.5; ≤ 64 open long polls |
+| Anchor HTTP, per IP | token bucket (burst 120, 4 per second); costs `put` 6, `cx_check` 12, `cx_tpub` 2, `cx_send` 1, `get`/`get_peers`/`cx_tfind` 1, others 0.5; ≤ 64 open long polls |
+| Topics | see §10.5 |
 | DHT | tokens = first 8 bytes of SHA1(secret ‖ window ‖ ip), valid for the current and previous 10-minute window; routing table ≤ 1000; peers per info_hash ≤ 200, kept 30 min |
 | Relaying | browsers ≤ 2 sessions at 256 kbit/s, natives ≤ 16 at 2 Mbit/s; ≤ 1 GB per hour; idle sessions close after 120 s. A session that bursts above twice its rate is closed |
 
@@ -180,3 +185,76 @@ Any W3C-compatible object works. CORVAX uses only:
 - `createOffer()`, `createAnswer()`, `setLocalDescription(d)`, `setRemoteDescription(d)`, `addIceCandidate(c)`, `close()`
 - `localDescription`, `remoteDescription`, `onicecandidate`
 - channels: `send`, `binaryType`, `readyState`, `onopen`, `onmessage`, `onclose`
+
+
+---
+
+## 10. Topics
+
+### 10.1 Topic ids
+```
+normalize(name) = NFKC, trim, collapse whitespace to one space, lowercase; 1–200 bytes UTF-8
+topic id        = SHA-256("cx/topic:" ‖ normalize(name))
+```
+
+### 10.2 Provider record
+```
+fields = bencode { t: topic id 32, k: ed_pub 32, seq: int, exp: int (ms since epoch) }
+record = bencode { t, k, seq, exp, sig },   sig = Ed25519("cx-topic" ‖ fields)
+```
+- **`seq`:** strictly increasing per (t, k).
+- **`exp`:** absolute and signed, at most `LEASE` = 10 min ahead.
+- **Tombstone (unpublish):** a record with a higher `seq` and `exp ≤ now`.
+- **A searcher considers a provider `recent`** while `exp > now` by its skew-corrected clock, otherwise `expired`. There is no other presence state.
+
+### 10.3 Storage node
+- **`cx_tpub` checks each record in this order:**
+
+  | Check | Status |
+  |---|---|
+  | signature and sizes | `bad` |
+  | `exp > now + LEASE + SKEW` (SKEW = 60 s) | `future` |
+  | stored seq > seq | `stale` |
+  | stored seq = seq | `dup` |
+  | `exp < now − SKEW` with nothing stored | `expired` |
+  | a new (t, k) beyond 64 topics per k or 50 000 records | `full` |
+  | otherwise | `ok`: stored, and an event is appended to the log |
+
+- **Retention:** live records are kept until `exp + SKEW`. Tombstones are kept until `now + LEASE + SKEW`, so older records can't be replayed.
+- **Event log:** `{n, t, record}`, with `n` increasing; at most 10 000 entries or 30 min. The cursor is `"<epoch>:<n>"`, where `epoch` is random per process start.
+- **`cx_twatch {t, c}`:**
+  - if `c` is missing, from another epoch, newer than the head, or older than the log, the reply is `{snap: 1, r: live records for t, c: head}`
+  - otherwise it returns the newest record per (t, k) among events after `c` for those topics
+  - when there are none yet, it waits up to 25 s, and after the first matching event 2 s more (coalescing); the reply is `{r, c: head}`
+- **Every topic reply carries `now`**, the storage node's clock in ms.
+
+### 10.4 Peers
+- **Replicas:**
+  - a provider sends its record to the 5 verified storage nodes (`st: 1`) in its anchor book with the smallest `ed_pub XOR topic id`, trying up to 8 when some fail
+  - it renews every 5 min ± 20 % jitter, batched per storage node
+  - `exp = now + skew + LEASE`, where `skew` = median of (storage `now` − local midpoint) over the last 8 replies; a `future`/`expired` status triggers one retry with the corrected skew
+- **Searching and watching:**
+  - searchers query the 8 closest storage nodes and verify every record themselves
+  - watchers run one `cx_twatch` per storage node covering all their topics assigned to that node (its 5 closest)
+- **Neighbour links:**
+  - a topic member keeps at most 4 links per topic and 16 in total, opened with `p: "topic"` to `recent` providers (direct, or relayed via `via?` when direct fails)
+  - a peer accepts a topic offer only if it is subscribed and below both limits, otherwise it answers `busy`
+  - if both sides dial each other at once, the offer from the lower address wins; the other answers `busy`
+
+### 10.5 Broadcast frame (binary, on a topic link's channel)
+```
+signed = bencode { t, id: 16 random bytes, ts: ms, from: ed_pub, body: ≤ 1024 bytes UTF-8 JSON }
+frame  = bencode { t, id, ts, from, body, p: sender's provider record for t, hop: 1..4, sig }    ≤ 4096 bytes
+sig    = Ed25519("cx-tb" ‖ signed)          hop is not signed
+```
+- **Origin:** sends to all its links for `t` with `hop = 4`.
+- **Receivers drop:**
+  - a wrong `t` for the link
+  - a seen `id` (cache 10 min)
+  - `now − ts > 120 s` or `ts − now > 60 s`
+  - an oversized body or frame
+  - a bad `sig`
+  - a `p` that isn't a valid record for this `t` and `from`, or whose `exp < now − 60 s`
+  - frames that exceed 10 per (`from`, `t`) per minute
+- **Otherwise** a receiver delivers the message, and if `hop > 1`, forwards it with `hop − 1` to at most 3 random other links for `t`, never to the incoming link or to `from`.
+- **Best-effort only:** no storage, history, acknowledgements, retries, ordering, late-join delivery or group encryption.

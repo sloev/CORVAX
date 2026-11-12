@@ -143,6 +143,7 @@ export class Peer {
     const ok = await Promise.allSettled([...new Set(targets.filter(Boolean))].map(u =>
       this.rpc(u, 'put', { k: rec.pub, seq: rec.seq, sig: rec.sig, v: rec.v })))
     if (!ok.some(r => r.status === 'fulfilled')) throw new CorvaxError('no-anchor', 'no anchor accepted the beacon')
+    this.beaconSeq = rec.seq
     clearTimeout(this.republish)
     this.republish = setTimeout(() => this.publish(extra).catch(() => {}), REPUBLISH)
     this.republish.unref?.()

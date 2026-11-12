@@ -13,7 +13,6 @@
   "files": [
     "src",
     "bin",
-    "assets/logo/corvax-web.png",
     "assets/logo/favicon.ico"
   ],
   "engines": {

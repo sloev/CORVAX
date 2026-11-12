@@ -33,13 +33,15 @@ test('publish replicates to exactly the 5 XOR-closest storage nodes; search find
 })
 
 test('watch: recent on publish, expired on unpublish; renewal keeps a provider recent', async () => {
-  const a = await peer(), w = await peer()
+  // lease ≫ renewal + 2 s coalescing, as in production (10 min vs 5 min); a 3 s lease would flap by design
+  const slow = { topicLimits: { lease: 8000, renew: 2000, jitter: 0.2 } }
+  const a = await peer(slow), w = await peer(slow)
   const events = []
   ;(await w.topic('go')).subscribe({ presence: e => events.push([e.address, e.presence]) })
   const t = await a.topic('go')
   await t.publish()
   await until(() => events.some(([x, p]) => x === a.address && p === 'recent'), 10000)
-  await new Promise(resolve => setTimeout(resolve, 4500))                      // longer than one lease (3 s)
+  await new Promise(resolve => setTimeout(resolve, 9000))                      // longer than one lease (8 s)
   assert.ok(!events.some(([, p]) => p === 'expired'), 'renewals kept it recent')
   assert.equal((await (await w.topic('go')).search()).length, 1)
   await t.unpublish()

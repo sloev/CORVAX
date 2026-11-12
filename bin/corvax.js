@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// corvax node     [--port 4799] [--anchors <file|url|line>...] [--no-relay] [--mainline] [--web https://…] [--public-host ip]
+// corvax node     [--port 4799] [--anchors <file|url|line>...] [--no-relay] [--no-storage] [--mainline] [--web https://…] [--public-host ip]
 // corvax anchor   (same flags; forces anchor mode, for the first anchors of a network)
 // corvax anchors  print the anchor book
 // corvax id       print this node's address
@@ -22,6 +22,7 @@ const opts = async extra => ({
   port: +(flags.port || 4799),
   anchors: await Promise.all(flags.anchors.map(anchorText)),
   relayFor: !flags['no-relay'],
+  storage: !flags['no-storage'],
   mainline: !!flags.mainline,
   web: typeof flags.web === 'string' ? flags.web : undefined,
   publicHost: typeof flags['public-host'] === 'string' ? flags['public-host'] : undefined,
@@ -42,5 +43,5 @@ if (cmd === 'node' || cmd === 'anchor') {
   if (cmd === 'resolve') console.log(JSON.stringify(await node.peer.resolve(args[0]), (k, v) => v instanceof Uint8Array ? undefined : v, 2))
   await node.close(); process.exit(0)
 } else {
-  console.log('usage: corvax node | anchor | anchors | id | resolve <address>   [--port 4799] [--anchors <file|url|line>] [--no-relay] [--mainline] [--web https://…]')
+  console.log('usage: corvax node | anchor | anchors | id | resolve <address>   [--port 4799] [--anchors <file|url|line>] [--no-relay] [--no-storage] [--mainline] [--web https://…]')
 }

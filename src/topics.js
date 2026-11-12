@@ -44,6 +44,12 @@ export class Topics {
     if (this.skews.length > 8) this.skews.shift()
   }
 
+  // Topic members must be reachable by key (others resolve our Beacon to connect), so make sure it exists.
+  ensureBeacon () {
+    if (!this.beacon) this.beacon = this.peer.beaconSeq ? Promise.resolve() : this.peer.publish().catch(e => { this.beacon = null; throw e })
+    return this.beacon
+  }
+
   async topic (name) {
     const id = await topicId(name), h = hex(id)
     if (!this.handles.has(h)) this.handles.set(h, new Topic(this, normalize(name), id))
@@ -334,6 +340,7 @@ export class Topic {
   async publish () {
     if (this.topics.closed) throw err('closed')
     this.published = true
+    await this.topics.ensureBeacon().catch(() => {})
     const stored = (await this.topics.publishNow([this])).get(this) || 0
     this.topics.schedule()
     if (!stored) throw err('no-storage', 'no storage node accepted the record')
@@ -351,6 +358,7 @@ export class Topic {
   subscribe ({ presence, message } = {}) {
     const s = { presence, message }
     this.subs.add(s)
+    this.topics.ensureBeacon().catch(() => {})
     this.topics.rewatch()
     this.topics.maintainSoon(this)
     return () => {

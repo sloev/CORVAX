@@ -1,5 +1,5 @@
 // Anchor services (native only): the cx_* query handlers, the inboxes, and the HTTP server.
-//   HTTP  GET /  homepage = anchor list · POST /krpc · GET /cx/*.js · GET /logo · GET /favicon.ico · GET /demo
+//   HTTP  GET /  homepage + anchor list · POST /krpc · GET /cx/*.js (library, app.js) · GET /favicon.ico
 // Anchors are trusted with nothing: records are signed and messages end-to-end encrypted.
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
@@ -219,9 +219,7 @@ export function httpServer (node) {
         const origin = node.web || `http://${String(req.headers.host || `${node.host}:${node.port}`).replace(/[^\w.:[\]-]/g, '')}`
         return res.end(homepage({ origin, line: node.line() || `(not an anchor) ${node.key}`, anchor: !!node.line(), services: node.services(), uptime: Date.now() - node.started, anchors: node.listing() }))
       }
-      if (path === '/logo') return send(res, new URL('corvax-web.png', logoDir), 'image/png', true)
       if (path === '/favicon.ico') return send(res, new URL('favicon.ico', logoDir), 'image/x-icon', true)
-      if (path === '/demo') return send(res, new URL('demo.html', srcDir), 'text/html; charset=utf-8')
       if (/^\/cx\/[a-z]+\.js$/.test(path)) return send(res, new URL(path.slice(4), srcDir), 'text/javascript; charset=utf-8')
       res.statusCode = 404; res.end()
     } catch { if (!res.headersSent) res.statusCode = 400; res.end() }
