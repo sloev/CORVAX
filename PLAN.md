@@ -38,7 +38,7 @@ Rendezvous does five things and then gets out of the way:
 - **Our own protocol on top, versioned as `rv/1`:** the `rv_*` queries, anchor lines, the message format, the anchor book rules and the connect flow. These are specified in `SPEC.md` with test vectors. The protocol only grows: fields and queries never change meaning, new ones get new names, and unknown fields are ignored.
 - **Core has zero runtime dependencies and no build step.** Plain ESM JavaScript; the browser loads the same files Node runs. Native runtimes get one *optional* default WebRTC library (§8).
 - **Standard crypto only:** WebCrypto Ed25519, X25519, HKDF-SHA256, AES-GCM, SHA-1/256. No custom key conversions.
-- **Small but not at the expense of safety.** Target is roughly 1,700 lines; correctness and tests come first.
+- **Small but not at the expense of safety.** Target is roughly 1,600 lines; correctness and tests come first.
 - **Platforms:** current Chrome, Firefox, Safari; Node ≥ 22, Bun ≥ 1.1, Deno ≥ 2 (via `npm:rendezvous`).
 
 ---
