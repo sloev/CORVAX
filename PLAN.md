@@ -1,7 +1,7 @@
 # RENDEZVOUS — Signal Over Anything
 
 > Fix signalling and peer discovery for good.
-> One address per peer that lasts for years. One small signed record. Any transport that can carry about 300 bytes.
+> One address per peer that lasts for years. One small signed record. Any transport that can carry **25–100 bytes**.
 
 ---
 
@@ -26,7 +26,7 @@ Rendezvous makes the **message format** the fixed part and lets the **transport*
    (CF)   relays trackers      DHT     DNS         bcast            chirp
 ```
 
-Signalling is really just **storing and forwarding small signed blobs, addressed by public key**. Anything that can carry ~300 bytes from A to B can be a carrier: a QR code, a DNS TXT record, a ping payload, a sound, a Bluetooth advert.
+Signalling is really just **storing and forwarding small signed blobs, addressed by public key**. Anything that can carry ~25–100 bytes from A to B can be a carrier: a QR code, a DNS TXT record, a ping payload, a sound, a Bluetooth advert.
 
 A client **races every carrier it can reach** ("happy eyeballs for signalling"). The first answer wins and duplicates are dropped by message ID. If one carrier goes down, another still works. If every server goes down, peers still find each other over the LAN, Bluetooth, sound or a QR code.
 
@@ -76,6 +76,8 @@ Signed with the Ed25519 key. Includes a `seq` (timestamp) and a TTL. Every carri
 ### 🔥 Trick #1: one-shot WebRTC (no offer/answer round trip)
 Browsers let you create a **persistent `RTCCertificate`** (`RTCPeerConnection.generateCertificate`) and store it in IndexedDB. If the Beacon already contains the DTLS fingerprint and the ICE credential seed, **a caller can build the callee's remote SDP locally**. The only thing left to send is candidates, which fit in one encrypted Letter. Signalling drops from offer → answer → trickle to **a single one-way message**. A message that small fits in an audio chirp, a BLE advert or a ping.
 
+✅ **Tested in Chromium** (`experiments/zero-sdp-webrtc.js`): the DataChannel opened and carried data with **no SDP exchanged at all** and only one ICE candidate sent one way. See §3b for how far this goes.
+
 ---
 
 ## 3. The Letter (signal a peer)
@@ -91,6 +93,60 @@ crypto = X25519 (converted from Ed25519) + XChaCha20-Poly1305 (sealed box)
 - Replay protection: `ts` plus `id` dedup window.
 - **SDP-lite:** a compact binary encoding of only what WebRTC actually needs (fingerprint, ufrag/pwd, candidates). A typical offer is about 120 bytes instead of about 3 KB.
 - Large payloads are split into chunks, with **fountain codes** (LT/RaptorQ) for lossy channels (animated QR, audio, ICMP).
+
+---
+
+## 3b. Squeezing it down: the byte budget
+
+Everything that both peers can **work out for themselves** is left off the wire.
+
+**Shared key:** convert both Ed25519 identity keys to X25519 and do a static-static Diffie-Hellman. That gives a pairwise key `K_ab` that both sides can compute without sending anything. Everything else is derived from `K_ab` with HKDF:
+
+| Derived from `K_ab` | Replaces (bytes saved) |
+|---|---|
+| ICE ufrag + pwd for both sides | 2 × ~26 B of credentials |
+| DTLS role (lower public key = `active`) | `setup:` negotiation |
+| Pairwise inbox topic `H(K_ab ‖ hour)` | 16 B recipient topic. Also better privacy: carriers can't even tell who the recipient is |
+| 4-byte contact hint `H(K_ab ‖ epoch)[0..4]` | 32 B sender public key (for known contacts) |
+| AEAD tag (proves the sender holds their key) | 64 B Ed25519 signature |
+| Nonce = timestamp/counter | 24 B random nonce |
+
+The SDP itself is rebuilt from a fixed template, so 0 bytes go on the wire for it.
+
+### Letter sizes
+| Case | Contents | Size |
+|---|---|---|
+| **Wake-up** (known contact; the callee's address is in its Beacon or both are on the same LAN) | ver 1 + hint 4 + counter 4 + tag 16 | **25 B** |
+| + one public IPv4 candidate | + type 1 + IP 4 + port 2 | **32 B** |
+| + one browser mDNS host candidate | + type 1 + UUID 16 + port 2 | **44 B** |
+| **First contact** (stranger) | + sender public key 32 + ephemeral key 32 (for forward secrecy). The receiver gets the sender's fingerprint from the sender's Beacon | **~90 B** |
+| First contact, fully self-contained (no Beacon lookup) | + DTLS fingerprint 32 | **~125 B** |
+| Ultra-narrow channels (LoRa/APRS): 8-byte tag | | wake-up in **17 B** |
+
+Why the wake-up can carry **zero candidates:** ICE learns *peer-reflexive* candidates from incoming connectivity checks. So it's enough for one side's address to be known; the other side is discovered when it connects.
+
+What fits where: the 25 B wake-up fits in **one legacy BLE advert (31 B)**. The 44 B letter fits in a ~1–2 second audio chirp, a tiny QR code (version 3), a single LoRa frame or one SMS.
+
+### Beacon size
+| Field | Bytes |
+|---|---|
+| signature + seq (required by BEP44; the key is the DHT key, so it isn't in the value) | 64 + 8 |
+| DTLS fingerprint (browsers check the full SHA-256, so it can't be shortened) | 32 |
+| Carrier bitmask, numbered from the signed default-carrier list (custom URLs only when needed) | 2 |
+| flags (LAN/BLE/relay-capable, PoW nonce length) | 1 |
+| optional public endpoint (IPv4 / IPv6) | 0 / 6 / 18 |
+| **Total (compact binary)** | **~107–125 B** |
+| As a pkarr DNS packet (one binary TXT record, plus DNS header and name) | **~140–160 B** |
+
+### What can't be shrunk
+- **The address stays 32 bytes**, because it is the key. Shorter handles need either trust or a PAKE short code (§1).
+- **The full 32-byte fingerprint** is required by browsers. After the first connection it is cached in the contact list.
+- General-purpose compression does nothing on ciphertext. Savings only come from leaving fields out.
+- **For text channels, pick the right alphabet:** QR alphanumeric mode with base45 instead of base64 in byte mode (~20% smaller QR codes), z-base32 for DNS labels, raw bytes for BLE, audio and LoRa.
+
+### Risks
+- **Editing the ICE ufrag/pwd in the SDP before applying it ("munging")** works in Chromium today (tested). Chrome has discussed restricting SDP munging, and Firefox and Safari are not tested yet. **Fallback:** send the real ufrag/pwd in the Letter (+26 B per side). The protocol should allow both modes from day one.
+- **Static-static DH gives no forward secrecy for the wake-up itself.** It only carries "call me" plus at most a candidate, never data. The actual channel uses ephemeral DTLS keys, and a Noise handshake inside the DataChannel ties the identity keys to the DTLS fingerprints.
 
 ---
 
@@ -240,7 +296,7 @@ dig +https @rv.example.com TXT rv1abc….rv.example.com       # resolve via DNS
 
 | Phase | Deliverable | "Done" means |
 |---|---|---|
-| **0. Spec** | `spec/`, test vectors, address format, Beacon/Letter, SDP-lite | Two independent implementations agree on the vectors |
+| **0. Spec** | `spec/`, test vectors, address format, Beacon/Letter, SDP-lite, zero-SDP mode + fallback, byte budget (§3b) | Two independent implementations agree on the vectors |
 | **1. Web MVP** | `core-ts`, Worker lighthouse, `rendezvous-js` | A laptop browser behind home NAT and a phone browser on 4G connect using only an `rv1…` address |
 | **2. No single point of failure** | nostr + tracker + MQTT + pkarr carriers, happy-eyeballs racing | Same test **with the Worker turned off** still connects |
 | **3. Offline web** | QR (animated), audio chirp, Web NFC, trick #1 | Two phones in airplane-mode-plus-WiFi-hotspot connect by sound alone |
