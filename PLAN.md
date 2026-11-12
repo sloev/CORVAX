@@ -19,13 +19,14 @@ The protocol ends when `connect()` returns an open DataChannel.
 - Anything on top of the DataChannel (framing, RPC, files, media)
 - Gossip about *peers*, social introductions, topics/rooms (only *anchors* are gossiped)
 - Reputation beyond the local anchor score, incentives, tokens
-- Our own WebRTC stack (browsers have one built in; other runtimes plug in a standard one)
+- A general WebRTC stack. We implement only the DataChannel subset that `connect()` needs (§6). No media, no SDP parser, no renegotiation
 - Ports to other languages (the spec is small and text-based, so others can write them)
 
 ### Finished when
 - [ ] All tests in §9 pass
 - [ ] A Beacon published by our code reads back from the public pkarr relay
 - [ ] Two browsers on different networks connect knowing only each other's address, both direct and forced through a peer relay
+- [ ] A Node peer and a browser connect the same way, and so do two Node peers (our WebRTC subset)
 - [ ] A fresh node with **no configuration** finds anchors through at least one channel in each row of §4.3
 - [ ] README + `SPEC.md` are written. After that the project only receives bug fixes.
 
@@ -41,7 +42,7 @@ The protocol ends when `connect()` returns an open DataChannel.
 | **Discovery protocol** | BitTorrent Mainline KRPC (BEP 5 + BEP 44) on every transport, plus 5 extra queries |
 | **Record** | pkarr signed packet (≤ 1000 B) = BEP 44 mutable item at `SHA1(pk)` |
 | **Anchor** | Any native node with a public UDP port: DHT node + STUN/TURN + anchor-book server on one port. With a reachable TCP port too, it also serves HTTP/WebSocket for browsers. **Native nodes promote themselves automatically** when a reachability check passes (§4.5). |
-| **Connection** | Standard WebRTC, zero SDP on the wire (ICE credentials derived from the shared key) |
+| **Connection** | Standard WebRTC, zero SDP on the wire (ICE credentials derived from the shared key). Browsers use their built-in `RTCPeerConnection`. **Node/Bun/Deno use our own DataChannel-only WebRTC subset (§6), written in plain JS on WebCrypto**, so every runtime can connect with zero dependencies |
 | **Relaying** | Plain TURN, run by anchors. ICE picks direct first and relay last. |
 
 ---
@@ -143,7 +144,31 @@ Authentication is implicit: only the key holder can decrypt the `rtc` message an
 
 ---
 
-## 6. Files (~1,800 lines total)
+## 6. Our WebRTC subset (for Node, Bun and Deno)
+
+A port of **just the DataChannel path**, written from the RFCs, using **str0m** (Rust, sans-IO, MIT/Apache-2.0) for structure and **werift** (TypeScript, MIT) and **Pion** (Go, MIT) as references. It is credited in the file headers, and no code is copied verbatim.
+
+Because both sides derive every parameter themselves (zero SDP), **there is no SDP parser and no offer/answer engine.** The subset talks to Chrome, Firefox and Safari as a normal WebRTC peer.
+
+| Layer | What we implement | What we skip | Lines |
+|---|---|---|---|
+| **STUN / ICE** (RFC 8445, 5389) | binding request/response, USERNAME, MESSAGE-INTEGRITY (HMAC-SHA1), FINGERPRINT (CRC-32), PRIORITY, ICE-CONTROLLING/CONTROLLED + tie-breaker, USE-CANDIDATE (aggressive nomination as controlling, honoured as controlled), consent freshness (answer and send every 5 s); host + srflx candidates; **TURN client** (Allocate, CreatePermission, Send/Data) for the relay case | TCP candidates, ICE restarts, regular nomination | ~300 |
+| **DTLS 1.2** (RFC 6347, 7627) | client **and** server; exactly one suite: `ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` on P-256; extended master secret; mutual certificates checked against the signalled fingerprint; HelloVerifyRequest handled as client; handshake fragmentation and reassembly; flight retransmission (1 s, doubling) | DTLS 1.3 (browsers fall back to 1.2), SRTP, resumption, renegotiation, other suites | ~600 |
+| **X.509** | generate a self-signed ECDSA P-256 certificate (minimal DER writer); read the peer's public key (minimal DER reader); convert ECDSA signatures between raw and DER | everything else | ~80 |
+| **SCTP** (RFC 4960, 8261) | association setup (INIT/INIT-ACK/COOKIE with HMAC cookie), DATA with fragmentation, SACK, retransmission timer, HEARTBEAT reply, SHUTDOWN/ABORT, CRC-32c; **one stream, id 0, reliable and ordered** (our channel is `negotiated: true, id: 0`, so no DCEP is needed) | multiple streams, partial reliability, FORWARD-TSN, gap-ack generation (we accept peers' gap acks), congestion-control tuning | ~400 |
+
+**Crypto mapping:** ECDHE → WebCrypto ECDH P-256; signatures → ECDSA P-256; PRF → HMAC-SHA256; records → AES-128-GCM; STUN → HMAC-SHA1. All of it comes from WebCrypto, so the subset runs on any runtime that has UDP.
+
+**The result:** `connect()`/`listen()` return the same small channel interface everywhere (`send`, `onmessage`, `onopen`, `onclose`, `close`, `readyState`), which is the subset of `RTCDataChannel` apps actually use.
+
+### Payoff: browsers can reach anchors without TLS or a domain
+With the subset running inside anchors, **a browser can open a WebRTC connection straight to an anchor's `IP:port`**, with no signalling server and no certificate authority. This is the `webrtc-direct` pattern. The anchor learns the browser's key from the ICE username (`ufrag = hex(browser_pk)`) and derives the shared password from both keys, so the very first packet is authenticated. KRPC then runs over that DataChannel.
+
+The anchor line gains the certificate hash: `rv-anchor:<z32>@<ip>:<port>;fp=<base64url sha-256>`. **Every anchor becomes usable from browsers**, not only the ones with `wss://`. WebSocket stays as the fallback for networks that block outbound UDP.
+
+---
+
+## 7. Files (~3,200 lines total)
 
 | File | Contents | State |
 |---|---|---|
@@ -157,16 +182,21 @@ Authentication is implicit: only the key holder can decrypt the `rtc` message an
 | `src/lan.js` | broadcast/multicast responder + client, mDNS responder + query | ⬜ ~110 |
 | `src/portmap.js` | NAT-PMP/PCP + UPnP-IGD | ⬜ ~100 |
 | `src/native.js` | Node/Bun/Deno node: wires UDP socket, book file, LAN, portmap, promotion, optional DNS:53 | ⬜ ~100 |
+| `src/webrtc/stun.js` | STUN codec, ICE agent, TURN client | ⬜ ~300 |
+| `src/webrtc/dtls.js` | DTLS 1.2 client+server, one cipher suite | ⬜ ~600 |
+| `src/webrtc/x509.js` | self-signed cert, DER helpers | ⬜ ~80 |
+| `src/webrtc/sctp.js` | SCTP association, one reliable stream, CRC-32c | ⬜ ~400 |
+| `src/webrtc/index.js` | `dial()/accept()` → channel; the same zero-SDP parameters as the browser path | ⬜ ~80 |
 | `bin/rv.js`, `src/demo.html`, `anchors.txt` | CLI (`anchor · node · id · anchors · resolve · send · listen`), demo, baked-in list | ✏️ |
 
 ---
 
-## 7. API
+## 8. API
 
 ```js
 import { Peer } from 'rendezvous'
 
-const me = await Peer.create({ seed })          // bootstraps itself via §4.3. Optional: anchors, sources, dohDomains, RTCPeerConnection
+const me = await Peer.create({ seed })          // bootstraps itself via §4.3. Optional: anchors, sources, dohDomains
 me.address
 await me.publish()
 me.listen(({ from, channel }) => {})
@@ -178,7 +208,7 @@ await me.resolve(address); await me.send(address, body); me.on(fn)
 ```
 Native: `rv node` (a peer that promotes itself to an anchor when reachable) or `rv anchor` (forces anchor mode).
 
-## 8. Limits enforced in code
+## 9. Limits enforced in code
 - Beacon: signature, monotonic seq, ≤ 1000 B. Message: AEAD sender authentication, ts window, IV dedup, ≤ 1024 B.
 - Anchor lines: ≤ 255 chars, IPs must be public unicast (except entries learned on the LAN), book ≤ 1000, at most 16 unverified probes per minute (so lists can't be used to make us attack someone).
 - Per IP: `put` 10/min, `rv_send` 60/min, `get` 120/min, `rv_anchors` 30/min, `rv_check` 5/min, `rv_turn` 10/min; LAN `RV?` replies 10/s.
@@ -186,7 +216,7 @@ Native: `rv node` (a peer that promotes itself to an anchor when reachable) or `
 
 ---
 
-## 9. Tests (`npm test`)
+## 10. Tests (`npm test`)
 | Test | Proves |
 |---|---|
 | `core` | encodings, ed→x, Beacon/message tamper and replay, **anchor line grep from messy text**, score maths |
@@ -196,14 +226,17 @@ Native: `rv node` (a peer that promotes itself to an anchor when reachable) or `
 | `promotion` | a node reachable from a second anchor becomes an anchor; an unreachable one doesn't |
 | `anchor` / `turn` | messaging across 3 anchors; STUN; TURN allocate/permission/data; quotas; rate limits |
 | `browser` | two Chromium pages: bootstrap from `/anchors.txt`, connect direct and forced-relay |
-| `bun` | `anchor` + `book` pass under Bun |
+| `webrtc-unit` | STUN/MI/FINGERPRINT vectors (RFC 5769), CRC-32c vectors, DTLS PRF vector, SCTP chunk round trips, packet-loss simulation (20% drop) still delivers 1 MB in order |
+| `webrtc-interop` | **our subset ↔ real Chromium** (Playwright), with our side as DTLS client *and* as server; native ↔ native; native ↔ native through TURN only; browser → anchor `webrtc-direct` running KRPC |
+| `bun` | `anchor` + `book` + `webrtc-interop` (native side) pass under Bun |
 | `live` (manual) | Beacon via `relay.pkarr.org`; TXT via public DoH; `announce_peer` on real Mainline |
 
-## 10. Build order
+## 11. Build order
 1. `dht` (+ get_peers/announce_peer, hooks) → `core`, `dht` green
 2. `book` + `rv_hi`/`rv_anchors` → `book` green
 3. `anchor` (KRPC over WS, HTTP, DoH, LAN `RV?`) + `lan` + `native` → `channels` green
 4. `portmap` + `rv_check` → `promotion` green
 5. `turn` + `rtc` + `peer.connect` → `anchor`, `turn`, `browser` green
-6. CLI, demo, baked-in `anchors.txt`, Bun, live checks
-7. README + `SPEC.md` (including the ICMP channel for native ports). **Done.**
+6. `webrtc/` subset: stun → x509 → dtls → sctp, each against Chromium as soon as it can talk → `webrtc-unit`, `webrtc-interop` green; then anchors accept `webrtc-direct`
+7. CLI, demo, baked-in `anchors.txt`, Bun, live checks
+8. README + `SPEC.md` (including the ICMP channel for native ports). **Done.**
