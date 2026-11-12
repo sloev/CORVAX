@@ -1,7 +1,8 @@
 // The Beacon: a pkarr-compatible signed DNS packet (BEP 44 mutable item, keyed by the Ed25519 key).
 // Wire format (same as pkarr relays): sig(64) | seq(8, big-endian microseconds) | DNS packet (<= 1000 bytes)
-// Content: TXT records "_cx" = "key=value", e.g. c=wss://anchor.example (where to deliver Letters).
-import { utf8, str, concat, u64, readU64 } from './bytes.js'
+// Content: TXT records "_cx" = "key=value":  x=<base64url X25519 key>  c=<anchor line> (where my inbox is)
+import { utf8, str, concat, u64, readU64, b64 } from './bytes.js'
+export { dnsEncode, dnsDecode }
 import { encode } from './bencode.js'
 import { sign, verify, sha1 } from './crypto.js'
 
@@ -10,6 +11,7 @@ export const signable = (seq, v) => concat(utf8('3:seq'), encode(seq), utf8('1:v
 export const target = pub => sha1(pub)                              // DHT key = SHA1(public key)
 
 export async function makeBeacon (kp, fields, seq = Date.now() * 1000) {
+  fields = { ...fields, x: b64(kp.xpub) }
   const txt = Object.entries(fields).flatMap(([k, vals]) => [].concat(vals).map(x => `${k}=${x}`))
   const v = dnsEncode(txt)
   if (v.length > 1000) throw new Error('beacon too large')

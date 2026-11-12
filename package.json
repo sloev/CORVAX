@@ -3,10 +3,30 @@
   "version": "0.1.0",
   "description": "CORVAX: find any peer by its key and open a WebRTC DataChannel to it. Universal discovery and signalling, zero dependencies.",
   "type": "module",
-  "exports": { ".": "./src/index.js", "./anchor": "./src/anchor.js" },
-  "bin": { "corvax": "bin/corvax.js" },
-  "files": ["src", "bin", "assets/logo/corvax-web.png", "assets/logo/favicon.ico"],
-  "engines": { "node": ">=22" },
-  "scripts": { "test": "node --test test/" },
-  "license": "MIT"
+  "exports": {
+    ".": "./src/index.js",
+    "./anchor": "./src/anchor.js"
+  },
+  "bin": {
+    "corvax": "bin/corvax.js"
+  },
+  "files": [
+    "src",
+    "bin",
+    "assets/logo/corvax-web.png",
+    "assets/logo/favicon.ico"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 --test-force-exit test/*.test.js"
+  },
+  "license": "MIT",
+  "optionalDependencies": {
+    "werift": "^0.27.0"
+  },
+  "devDependencies": {
+    "node-datachannel": "^0.33.6"
+  }
 }

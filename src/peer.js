@@ -1,136 +1,247 @@
-// The peer: an identity that can announce itself, find others by address, and exchange
-// end-to-end encrypted Letters with them through any anchor. Uses only WebSocket + WebCrypto,
-// so the same file runs in browsers, Node 22+, Bun, Deno and Cloudflare Workers.
-import { keypair, sign, shared, derive, aesKey, encrypt, decrypt } from './crypto.js'
-import { makeBeacon, verifyBeacon, fields, pack, unpack } from './record.js'
-import { b64, unb64, hex, unhex, utf8, str, z32, unz32, concat, u64, readU64, random, equal } from './bytes.js'
+// The Peer: one identity that bootstraps from the anchor book, announces itself (Beacon),
+// resolves others, exchanges signed+encrypted messages through anchors' inboxes, and opens
+// DataChannels (direct, or relayed by a third peer). Uses only fetch + WebCrypto + WebRTC,
+// so the same file runs in browsers, Node, Bun and Deno.
+import { identity, supported, sign, verify, sha1 } from './crypto.js'
+import { seal, open, MAX_AGE } from './message.js'
+import { makeBeacon, verifyBeacon, fields } from './record.js'
+import { encode, decode } from './bencode.js'
+import { Book, parseLine, formatLine } from './book.js'
+import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, concat, equal } from './bytes.js'
+import * as rtc from './rtc.js'
+import * as relay from './relay.js'
+import baked from './anchors.js'
 
-const MAX_AGE = 600e3
+export class CorvaxError extends Error {
+  constructor (code, message) { super(message || code); this.code = code }
+}
+
+const isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined'
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const REPUBLISH = 30 * 60e3
+
+export const hostUrl = e => `http://${e.host.includes(':') ? `[${e.host}]` : e.host}:${e.port}`
 
 export class Peer {
-  static async create ({ seed, anchors = [] } = {}) {
+  static async create (o = {}) {
+    if (!await supported()) throw new CorvaxError('unsupported', 'this runtime lacks WebCrypto Ed25519/X25519')
     const p = new Peer()
-    p.kp = await keypair(seed && (typeof seed === 'string' ? unhex(seed) : seed))
-    p.address = z32(p.kp.pub)
-    p.seed = hex(p.kp.seed)
-    p.anchors = anchors
-    p.links = new Map()        // url -> Link
-    p.keys = new Map()         // hex(pub) -> { aes, sh }
-    p.seen = new Map()         // replay protection: hex(iv) -> time
+    p.id = await identity(typeof o.seed === 'string' ? unhex(o.seed) : (o.seed || undefined))
+    p.address = z32(p.id.pub)
+    p.seed = hex(p.id.seed)
+    p.book = o.book || new Book({ allowPrivate: o.allowPrivate })
+    p.platform = { ...defaultPlatform(), ...o.platform }
+    p.relay = o.relay ?? 'fallback'
+    p.relayFor = o.relayFor ?? true
+    p.limits = { ...(isBrowser ? { sessions: 2, kbps: 256 } : { sessions: 16, kbps: 2048 }), ...o.relayLimits }
+    p.RTC = await pickRTC(o.RTCPeerConnection)
+    p.self = o.self || null                  // { key, line, url } when this peer is itself an anchor
     p.handlers = new Set()
-    await Promise.all(anchors.map(u => p.link(u, true).ready.catch(() => {})))
+    p.acceptors = new Set()
+    p.seen = new Map()                       // message id -> time (replay protection)
+    p.beacons = new Map()                    // address -> { beacon, t }
+    p.conns = new Map()                      // address -> open direct connection { pc, app, ctl }
+    p.sessions = new Map()                   // sid -> WebRTC negotiation state
+    p.bridges = new Map()                    // sid -> sessions we relay for others
+    p.channels = new Map()                   // sid -> relayed channels we are an end of
+    p.blockDirect = new Set()                // test hook: pretend direct ICE fails to these addresses
+    p.inboxes = []
+    p.abort = new AbortController()
+    await p.bootstrap(o)
+    for (const ib of p.inboxes) p.#poll(ib)
     return p
   }
 
-  // Announce: "Letters for me go to these anchors" (+ any extra fields), signed, into the DHT.
+  // ---- anchor book ---------------------------------------------------------------------------
+  async bootstrap (o = {}) {
+    for (const t of [baked, await this.platform.loadCache?.() || '', ...(o.anchors || [])]) this.book.add(t)
+    if (this.self) { this.book.add(this.self.line); this.book.record(this.self.key, 'id', true) }
+    const sources = [...(o.sources || [])]
+    const home = typeof location !== 'undefined' && /^https?:/.test(import.meta.url) ? new URL('/', import.meta.url).href : null
+    if (home) sources.push(home)            // the anchor that served this library is a source
+    await Promise.allSettled([
+      ...sources.map(u => this.platform.fetchText(u).then(t => this.book.add(t))),
+      ...(o.dohDomains || []).map(d => this.platform.dnsTxt(`_corvax-anchors.${d}`).then(t => this.book.add(t))),
+      this.platform.discover?.().then(t => this.book.add(t || '', { lan: true }))
+    ])
+    await this.verify(12)
+    this.inboxes = this.#chooseInboxes()
+    await Promise.allSettled(this.inboxes.map(ib => this.rpc(ib.url, 'cx_anchors', {}).then(r => this.book.add(str(r.a)))))
+    this.platform.saveCache?.(this.book.toText())
+  }
+
+  // Probe entries: does the anchor answer, and does it hold the key in its line?
+  async verify (n = 16) {
+    const due = this.book.due(n).filter(e => this.urlOf(e))
+    if (this.platform.probe) return this.platform.probe(due)
+    await Promise.allSettled(due.map(e => this.hi(e)))
+  }
+  async hi (e) {
+    const n = random(16), t0 = Date.now()
+    let r
+    try { r = await this.rpc(this.urlOf(e), 'cx_hi', { n }, { timeout: 5000, retries: 0 }) } catch { return this.book.record(e.key, 'http', false) }
+    const ok = r.k instanceof Uint8Array && equal(r.k, unz32(e.key)) && await verify(r.k, r.sig, concat(utf8('cx-hi'), n))
+    this.book.record(e.key, 'id', ok)
+    if (ok) this.book.record(e.key, 'http', true, Date.now() - t0)
+    return ok
+  }
+  anchors () { return this.book.shared(isBrowser ? 'browser' : 'native') }
+  addAnchors (text) { return this.book.add(text).length }
+
+  // Where to reach an anchor over HTTP from here (browsers on https pages need an https origin).
+  urlOf (e) {
+    if (this.self && e.key === this.self.key) return this.self.url
+    if (isBrowser && typeof location !== 'undefined' && location.protocol === 'https:') return e.web?.startsWith('https:') ? e.web : null
+    return e.web || hostUrl(e)
+  }
+  #chooseInboxes () {
+    if (this.self) return [{ entry: this.book.get(this.self.key), url: this.self.url }]
+    return this.book.best(2, isBrowser ? 'browser' : 'native', e => e.verified && this.urlOf(e))
+      .map(entry => ({ entry, url: this.urlOf(entry) }))
+  }
+  iceServers () {
+    return this.book.best(2, 'native', e => e.verified)
+      .map(e => ({ urls: `stun:${e.host.includes(':') ? `[${e.host}]` : e.host}:${e.port}` }))
+  }
+
+  // ---- KRPC over HTTP --------------------------------------------------------------------------
+  async rpc (url, q, a = {}, { timeout = 8000, retries = 2 } = {}) {
+    if (!url) throw new CorvaxError('no-anchor', 'no reachable anchor')
+    const body = encode({ t: random(4), y: 'q', q, a, ro: 1 })       // same t on retries → executed once
+    for (let i = 0; ; i++) {
+      try {
+        const signal = AbortSignal.any([AbortSignal.timeout(timeout), this.abort.signal])
+        const res = await fetch(url.replace(/\/$/, '') + '/krpc', { method: 'POST', headers: { 'content-type': 'text/plain' }, body, signal })
+        const m = decode(new Uint8Array(await res.arrayBuffer()))
+        if (m.y && str(m.y) === 'r') return m.r
+        const [code, msg] = Array.isArray(m.e) ? m.e : [0, 'bad reply']
+        throw Object.assign(new CorvaxError('remote', `${q}: ${code} ${str(msg instanceof Uint8Array ? msg : utf8(String(msg)))}`), { remote: true })
+      } catch (e) {
+        if (e.remote || this.abort.signal.aborted || i >= retries) throw e
+        await sleep(300 * 2 ** i)
+      }
+    }
+  }
+
+  // ---- Beacon ------------------------------------------------------------------------------------
   async publish (extra = {}) {
-    const rec = await makeBeacon(this.kp, { c: this.anchors, ...extra })
-    const msg = { op: 'publish', pub: b64(rec.pub), rec: b64(pack(rec)) }
-    const ok = await Promise.allSettled(this.anchors.map(u => this.link(u).request(msg)))
-    if (!ok.some(r => r.status === 'fulfilled')) throw new Error('no anchor accepted the beacon')
+    if (!this.inboxes.length) throw new CorvaxError('no-anchor', 'no verified anchor to publish through')
+    const rec = await makeBeacon(this.id, { ...extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
+    const targets = [...this.inboxes.map(ib => ib.url), ...this.book.best(2, 'native', e => e.verified).map(e => this.urlOf(e))]
+    const ok = await Promise.allSettled([...new Set(targets.filter(Boolean))].map(u =>
+      this.rpc(u, 'put', { k: rec.pub, seq: rec.seq, sig: rec.sig, v: rec.v })))
+    if (!ok.some(r => r.status === 'fulfilled')) throw new CorvaxError('no-anchor', 'no anchor accepted the beacon')
+    clearTimeout(this.republish)
+    this.republish = setTimeout(() => this.publish(extra).catch(() => {}), REPUBLISH)
+    this.republish.unref?.()
     return rec
   }
 
-  // Look up an address on every anchor we know; keep the newest validly signed record.
-  async resolve (address) {
-    const pub = unz32(address)
+  async resolve (address, { fresh = false } = {}) {
+    const cached = this.beacons.get(address)
+    if (cached && !fresh && Date.now() - cached.t < 30e3) return cached.beacon
+    const pub = unz32(address), target = await sha1(pub)
+    const urls = [...new Set([...this.inboxes.map(ib => ib.url), ...this.book.best(3, 'native', e => e.verified).map(e => this.urlOf(e))].filter(Boolean))].slice(0, 3)
     let best = null
-    await Promise.allSettled(this.anchors.map(async u => {
-      const { rec } = await this.link(u).request({ op: 'resolve', pub: b64(pub) })
-      const r = rec && unpack(pub, unb64(rec))
-      if (r && (!best || r.seq > best.seq) && await verifyBeacon(r)) best = r
+    await Promise.allSettled(urls.map(async u => {
+      const r = await this.rpc(u, 'get', { target })
+      if (!r.v || !(r.k instanceof Uint8Array) || !equal(r.k, pub)) return
+      const rec = { pub, seq: r.seq, sig: r.sig, v: r.v }
+      if ((!best || rec.seq > best.seq) && await verifyBeacon(rec)) best = rec
     }))
-    return best && { address, seq: best.seq, ...fields(best) }
+    if (!best) return null
+    const f = fields(best)
+    const beacon = { address, seq: best.seq, x: f.x?.[0] && unb64(f.x[0]), c: f.c || [], fields: f }
+    for (const line of beacon.c) this.book.add(line)
+    this.beacons.set(address, { beacon, t: Date.now() })
+    return beacon
   }
 
-  // Send an encrypted Letter (any JSON value). Tries the recipient's anchors, then our own.
-  async send (address, body, beacon) {
-    const to = unz32(address), letter = b64(await this.seal(to, body))
-    beacon ??= await this.resolve(address).catch(() => null)
-    const urls = [...new Set([...(beacon?.c || []), ...this.anchors])]
-    for (const u of urls) {
-      try { if ((await this.link(u).request({ op: 'send', to: b64(to), letter })).delivered) return true } catch {}
+  // ---- messages ----------------------------------------------------------------------------------
+  async signal (address, body, beacon) {
+    beacon ??= await this.resolve(address)
+    if (!beacon?.x) throw new CorvaxError('not-found', `no record for ${address}`)
+    const to = unz32(address), msg = await seal(this.id, to, beacon.x, body)
+    let last = 'no usable anchor line'
+    for (const line of beacon.c) {
+      const e = parseLine(line), url = e && this.urlOf(e)
+      if (!url) continue
+      try { await this.rpc(url, 'cx_send', { to, msg }); return true } catch (err) { last = err.message }
     }
-    return false     // queued (for ~2 minutes) on the anchors that accepted it
+    throw new CorvaxError('no-anchor', `no inbox of ${address} is reachable (${last})`)
   }
-
+  send (address, body) { return this.signal(address, { app: body }) }
   on (fn) { this.handlers.add(fn); return () => this.handlers.delete(fn) }
-  close () { for (const l of this.links.values()) l.close() }
 
-  // ---- Letters: from(32) | iv(12) | AES-GCM( timestamp(8) | JSON ) under K_ab ------------------
-  async key (pub) {
-    let k = this.keys.get(hex(pub))
-    if (!k) {
-      const sh = await shared(this.kp, pub)
-      this.keys.set(hex(pub), k = { sh, aes: await aesKey(await derive(sh, 'cx/letter')) })
+  async #onWire (wire) {
+    let m
+    try { m = await open(this.id, wire) } catch { return }
+    if (this.seen.has(m.id)) return
+    const now = Date.now()
+    this.seen.set(m.id, now)
+    if (this.seen.size > 5000) for (const [k, t] of this.seen) if (now - t > MAX_AGE) this.seen.delete(k)
+    const from = z32(m.from), body = m.body
+    if (body?.cx) {
+      if (body.cx.startsWith('via')) return relay.onSignal(this, from, body).catch(() => {})
+      return rtc.onSignal(this, from, body).catch(() => {})
     }
-    return k
-  }
-  async seal (to, body) {
-    const iv = random(12)
-    const pt = concat(u64(Date.now()), utf8(JSON.stringify(body)))
-    return concat(this.kp.pub, iv, await encrypt((await this.key(to)).aes, iv, pt))
-  }
-  async open (letter) {
-    const from = letter.slice(0, 32), iv = letter.slice(32, 44)
-    const pt = await decrypt((await this.key(from)).aes, iv, letter.slice(44))
-    const ts = readU64(pt), now = Date.now()
-    if (Math.abs(now - ts) > MAX_AGE || this.seen.has(hex(iv))) throw new Error('stale or replayed letter')
-    this.seen.set(hex(iv), now)
-    for (const [k, t] of this.seen) if (now - t > MAX_AGE) this.seen.delete(k)
-    return { from: z32(from), body: JSON.parse(str(pt.slice(8))) }
-  }
-  async #onLetter (letter) {
-    let msg
-    try { msg = await this.open(unb64(letter)) } catch { return }
-    if (equal(unz32(msg.from), this.kp.pub)) return
-    for (const fn of this.handlers) fn(msg)
+    if ('app' in (body || {})) for (const fn of this.handlers) fn({ from, body: body.app })
   }
 
-  // A WebSocket to an anchor, with request/response and (for our own anchors) auto-reconnect.
-  link (url, home = false) {
-    let l = this.links.get(url)
-    if (l) return l
-    const pending = new Map()
-    let n = 0, ws, closed = false, wait = 500
-    l = {
-      request: m => l.ready.then(() => new Promise((resolve, reject) => {
-        const id = n++
-        const timer = setTimeout(() => { pending.delete(id); reject(new Error('timeout')) }, 10000)
-        pending.set(id, r => { clearTimeout(timer); r.ok ? resolve(r) : reject(new Error(r.error)) })
-        ws.send(JSON.stringify({ ...m, id }))
-      })),
-      close: () => { closed = true; ws?.close() }
+  async #poll (ib) {
+    let after = 0, fails = 0
+    while (!this.abort.signal.aborted) {
+      try {
+        const ts = Date.now(), sig = await sign(this.id, utf8(`cx-listen:${ts}`))
+        const r = await this.rpc(ib.url, 'cx_listen', { k: this.id.pub, ts, sig, after }, { timeout: 35000, retries: 0 })
+        fails = 0
+        for (const m of r.msgs || []) { after = Math.max(after, m.seq); this.#onWire(m.msg) }
+      } catch {
+        if (this.abort.signal.aborted) return
+        await sleep(Math.min(30e3, 500 * 2 ** ++fails))
+      }
     }
-    const connect = () => {
-      l.ready = new Promise((resolve, reject) => {
-        ws = new WebSocket(url)
-        ws.onopen = async () => {
-          wait = 500
-          if (home) {
-            const ts = Date.now()
-            ws.send(JSON.stringify({ op: 'hello', pub: b64(this.kp.pub), ts, sig: b64(await sign(this.kp, utf8(`cx-hello:${ts}`))) }))
-          }
-          resolve()
-        }
-        ws.onmessage = e => {
-          const m = JSON.parse(e.data)
-          if (m.op === 'letter') this.#onLetter(m.letter)
-          else pending.get(m.id)?.(m), pending.delete(m.id)
-        }
-        ws.onerror = () => reject(new Error(`cannot reach ${url}`))
-        ws.onclose = () => {
-          for (const fn of pending.values()) fn({ ok: false, error: 'connection closed' })
-          pending.clear()
-          if (closed) return
-          if (!home) return this.links.delete(url)
-          setTimeout(connect, wait = Math.min(wait * 2, 30000))
-        }
-      })
-      l.ready.catch(() => {})
+  }
+
+  // ---- connections -------------------------------------------------------------------------------
+  accept (fn) { this.acceptors.add(fn); return () => this.acceptors.delete(fn) }
+
+  async connect (address, { relay: mode = this.relay, timeout = 10000 } = {}) {
+    try {
+      return await rtc.direct(this, address, { timeout })
+    } catch (e) {
+      if (mode !== 'fallback' || !['ice-failed', 'no-answer'].includes(e.code)) throw e
     }
-    connect()
-    this.links.set(url, l)
-    return l
+    return relay.via(this, address, { timeout: timeout * 3 })
+  }
+
+  close () {
+    this.abort.abort()
+    clearTimeout(this.republish)
+    for (const c of this.conns.values()) try { c.pc.close() } catch {}
+    for (const s of this.sessions.values()) try { s.pc?.close() } catch {}
+    this.conns.clear(); this.sessions.clear()
+  }
+}
+
+async function pickRTC (given) {
+  if (given) return given
+  if (globalThis.RTCPeerConnection) return globalThis.RTCPeerConnection
+  try { const name = 'werift'; return (await import(name)).RTCPeerConnection } catch { return null }
+}
+
+export function defaultPlatform () {
+  const ls = (() => { try { return globalThis.localStorage } catch { return null } })()
+  return {
+    loadCache: () => { try { return ls?.getItem('corvax.anchors') || '' } catch { return '' } },
+    saveCache: t => { try { ls?.setItem('corvax.anchors', t) } catch {} },
+    fetchText: async u => (await fetch(u, { signal: AbortSignal.timeout(8000) })).text(),
+    // DNS TXT through public DNS-over-HTTPS (JSON API); works in browsers and every runtime
+    dnsTxt: async name => {
+      const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`,
+        { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(8000) })
+      const j = await r.json()
+      return (j.Answer || []).map(a => String(a.data).replace(/"\s*"/g, '').replace(/^"|"$/g, '')).join('\n')
+    }
   }
 }

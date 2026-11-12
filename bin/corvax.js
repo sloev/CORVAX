@@ -1,46 +1,46 @@
 #!/usr/bin/env node
-// corvax anchor   [--port 4799] [--bootstrap host:port,...] [--mainline]
-// corvax id
-// corvax resolve <address>        [--anchor ws://...]
-// corvax send    <address> <text> [--anchor ws://...]
-// corvax listen                   [--anchor ws://...]
-import { anchor } from '../src/anchor.js'
-import { Peer } from '../src/peer.js'
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+// corvax node     [--port 4799] [--anchors <file|url|line>...] [--no-relay] [--mainline] [--web https://…] [--public-host ip]
+// corvax anchor   (same flags; forces anchor mode, for the first anchors of a network)
+// corvax anchors  print the anchor book
+// corvax id       print this node's address
+// corvax resolve <address>
+import { start } from '../src/node.js'
+import { readFile } from 'node:fs/promises'
 
 const [cmd, ...rest] = process.argv.slice(2)
-const flags = {}, args = []
+const flags = { anchors: [] }, args = []
 for (let i = 0; i < rest.length; i++) {
-  if (rest[i].startsWith('--')) flags[rest[i].slice(2)] = rest[i + 1]?.startsWith('--') || rest[i + 1] === undefined ? true : rest[++i]
-  else args.push(rest[i])
+  const a = rest[i]
+  if (!a.startsWith('--')) { args.push(a); continue }
+  const k = a.slice(2), v = rest[i + 1] && !rest[i + 1].startsWith('--') ? rest[++i] : true
+  if (k === 'anchors') flags.anchors.push(v); else flags[k] = v
 }
-const anchors = String(flags.anchor || process.env.CORVAX_ANCHOR || 'ws://localhost:4799').split(',')
-const seedFile = process.env.CORVAX_SEED_FILE || join(homedir(), '.config', 'corvax', 'seed')
+const anchorText = async s => /^https?:/.test(s) ? (await fetch(s)).text() : s.startsWith('corvax-anchor:') ? s : readFile(s, 'utf8').catch(() => s)
+const log = (...a) => console.error(...a)
 
-async function me () {
-  let seed
-  try { seed = (await readFile(seedFile, 'utf8')).trim() } catch {}
-  const peer = await Peer.create({ seed, anchors })
-  if (!seed) { await mkdir(dirname(seedFile), { recursive: true }); await writeFile(seedFile, peer.seed, { mode: 0o600 }) }
-  return peer
-}
+const opts = async extra => ({
+  port: +(flags.port || 4799),
+  anchors: await Promise.all(flags.anchors.map(anchorText)),
+  relayFor: !flags['no-relay'],
+  mainline: !!flags.mainline,
+  web: typeof flags.web === 'string' ? flags.web : undefined,
+  publicHost: typeof flags['public-host'] === 'string' ? flags['public-host'] : undefined,
+  lan: !flags['no-lan'],
+  log,
+  ...extra
+})
 
-if (cmd === 'anchor') {
-  const bootstrap = flags.bootstrap ? String(flags.bootstrap).split(',').map(s => { const [host, port] = s.split(':'); return { host, port: +port } }) : []
-  await anchor({ port: +(flags.port || 4799), bootstrap, mainline: !!flags.mainline, log: (...a) => console.log(...a) })
-} else if (cmd === 'id') {
-  const p = await me(); console.log(p.address); p.close()
-} else if (cmd === 'resolve') {
-  const p = await me(); console.log(JSON.stringify(await p.resolve(args[0]), null, 2)); p.close()
-} else if (cmd === 'send') {
-  const p = await me(); console.log((await p.send(args[0], args.slice(1).join(' '))) ? 'delivered' : 'queued'); p.close()
-} else if (cmd === 'listen') {
-  const p = await me()
-  await p.publish()
-  console.log(`listening as ${p.address}`)
-  p.on(({ from, body }) => console.log(`${from}: ${typeof body === 'string' ? body : JSON.stringify(body)}`))
+if (cmd === 'node' || cmd === 'anchor') {
+  const node = await start(await opts({ anchor: cmd === 'anchor' ? 'force' : flags['no-anchor'] ? 'off' : 'auto' }))
+  console.log(node.line() || `node ${node.key} (not publicly reachable, client only)`)
+  const stop = async () => { await node.close(); process.exit(0) }
+  process.on('SIGINT', stop); process.on('SIGTERM', stop)
+} else if (cmd === 'anchors' || cmd === 'id' || cmd === 'resolve') {
+  const node = await start(await opts({ anchor: 'off', lan: cmd === 'anchors', port: 0 }))
+  if (cmd === 'id') console.log(node.key)
+  if (cmd === 'anchors') console.log(node.book.toText())
+  if (cmd === 'resolve') console.log(JSON.stringify(await node.peer.resolve(args[0]), (k, v) => v instanceof Uint8Array ? undefined : v, 2))
+  await node.close(); process.exit(0)
 } else {
-  console.log('usage: corvax anchor | id | resolve <addr> | send <addr> <text> | listen   [--anchor ws://host:port]')
+  console.log('usage: corvax node | anchor | anchors | id | resolve <address>   [--port 4799] [--anchors <file|url|line>] [--no-relay] [--mainline] [--web https://…]')
 }

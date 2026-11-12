@@ -1,6 +1,6 @@
-export { Peer } from './peer.js'
-export { connect, listen } from './webrtc.js'
-export { DHT, MAINLINE } from './dht.js'
-export { makeBeacon, verifyBeacon, fields, pack, unpack } from './record.js'
-export { keypair, sign, verify } from './crypto.js'
+// CORVAX: find any peer by its key and open a WebRTC DataChannel to it.
+export { Peer, CorvaxError } from './peer.js'
+export { Book, parseLine, formatLine } from './book.js'
+export { DHT } from './dht.js'
+export { identity } from './crypto.js'
 export { z32, unz32 } from './bytes.js'

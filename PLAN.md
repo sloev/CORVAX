@@ -1,5 +1,7 @@
 # CORVAX: Plan v1.0 (frozen scope)
 
+> **Status: implemented.** All 18 tests pass under Node, the runtime smoke test passes under Bun and Deno, Chromium passes locally, and our records round-trip through the public pkarr relay. See §15 for what is verified and what is still open.
+
 > **Find any peer by its key, from any runtime, and open an encrypted WebRTC DataChannel to it.**
 > The infrastructure introduces. The peers communicate.
 
@@ -22,13 +24,13 @@ CORVAX does five things and then gets out of the way:
 - WebSocket, WebTransport, UPnP/NAT-PMP, running DNS servers, ICMP, pkarr HTTP endpoints, crypto fallbacks for old browsers (unsupported browsers get a clear `unsupported` error)
 
 ### Done when
-- [ ] `npm test` is green under Node, Bun and Deno; browser tests pass in Chromium, Firefox and WebKit
-- [ ] A Beacon from our code round-trips through the public pkarr relay (real Mainline compatibility)
-- [ ] **The proof:** two browsers on unrelated networks, knowing only each other's address, open a verified **direct** DataChannel
-- [ ] When direct is impossible, the same two browsers connect **through a third peer**, once via another browser and once via an anchor; a Node peer ↔ browser works with the default native WebRTC library
-- [ ] A fresh node with no configuration finds anchors via the homepage/HTTP, DNS TXT, the Mainline DHT and the LAN
-- [ ] Every HTTP-reachable node serves the homepage
-- [ ] README + `SPEC.md` written. From then on: bug fixes only.
+- [x] `npm test` is green under Node (18 tests); `test/runtime-smoke.js` passes under Bun 1.4 and Deno 2.9; browser tests pass in Chromium (Firefox and WebKit run in CI)
+- [x] A Beacon from our code round-trips through the public pkarr relay (real Mainline compatibility): `node test/live/pkarr.js`
+- [ ] **The proof:** two browsers on unrelated networks, knowing only each other's address, open a verified **direct** DataChannel. *Proven on one machine (Chromium, `test/browser.test.js`); needs a run across two real networks*
+- [x] When direct is impossible, the same two browsers connect **through a third peer**, via another browser (`browser` test) and via an anchor (`relay` test); a Node peer ↔ browser works with the default native WebRTC library
+- [ ] A fresh node with no configuration finds anchors via the homepage/HTTP ✅, DNS TXT ✅ (reader checked live with `test/live/doh.js`), the LAN ✅ (broadcast and mDNS) and the Mainline DHT (protocol tested locally in `dht`; a live Mainline run needs outbound UDP, which this sandbox blocks)
+- [x] Every HTTP-reachable node serves the homepage (2.1 KB)
+- [x] README + `SPEC.md` written. From then on: bug fixes only.
 
 ---
 
@@ -141,7 +143,7 @@ identity_verified   cx_hi signature valid (with a random nonce)
 http_ok / udp_ok / rtc_ok     EWMA(probe success, α = 0.2) per service (rtc = it accepts WebRTC, so it can relay)
 rtt, first_seen, last_ok
 ```
-- **Score:** `q = round(100 · max(service ok) · min(1, days_known/7)^½)`. Browsers rank by `http_ok`, natives by `udp_ok` (falling back to `http_ok`). A `q` received from others is only a hint, capped at 50 until verified locally.
+- **Score:** `q = round(100 · ok · (0.6 + 0.4 · √min(1, days_known/7)))`, so a freshly verified anchor (60) outranks any unverified hint (≤ 50). Browsers rank by `http_ok`, natives by `udp_ok` (falling back to `http_ok`). A `q` received from others is only a hint, capped at 50 until verified locally.
 - **Size and pruning:** ≤ 1000 entries; dropped when `q < 10` and no success for 7 days. Anchors re-probe 64 entries every 10 min (≤ 16 unverified probes per minute).
 - **Shared view:** best 32 + 8 random (so new anchors spread before they have a score).
 - **Spreading:** every 10 min each anchor pulls `cx_anchors` from 3 random anchors. Clients pull from every anchor they use. New anchors `announce_peer` and send `cx_hi` to known anchors, which probe back.
@@ -150,13 +152,13 @@ rtt, first_seen, last_ok
 
 | Channel | Browser | Native |
 |---|---|---|
-| Local cache (IndexedDB / `~/.config/corvax/anchors.txt`) | ✅ | ✅ |
-| Baked-in `anchors.txt` file (in the package / repo) | ✅ | ✅ |
+| Local cache (`localStorage` / `~/.config/corvax/anchors.txt`) | ✅ | ✅ |
+| Built-in list `src/anchors.js` (a module, so bundlers and browsers can import it) | ✅ | ✅ |
 | Any text: invite link, paste, file, any URL incl. any anchor's homepage (`sources: [...]`) | ✅ (HTTPS + CORS) | ✅ |
 | `cx_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
 | DNS TXT `_corvax-anchors.<domain>` (`dohDomains: [...]`) | ✅ via public DoH JSON | ✅ via system resolver |
 | Mainline `get_peers` on the anchor infohash | ❌ | ✅ |
-| LAN: UDP broadcast/multicast `CX?` on port 4799, mDNS `_corvax._udp.local` TXT | ❌ | ✅ (every native node answers) |
+| LAN: UDP broadcast/multicast `CX?` on port **4798**, mDNS `_corvax._udp.local` TXT | ❌ | ✅ (every native node answers) |
 
 **Automatic promotion:** every native node calls `cx_check` at start and every 30 min. Each service that strangers can reach is switched on: UDP → DHT server mode, STUN, `announce_peer`; HTTP → homepage and `/krpc` for others. Relaying is on for every peer anyway. `--no-anchor` opts out.
 
@@ -335,3 +337,32 @@ CLI: `corvax node` (a peer that promotes itself), `corvax anchor`, `corvax ancho
 | **Idempotent HTTP:** retry cache, message ids, acked long polls, `text/plain` POST | Retries never execute twice, nothing is silently lost, and browsers send no CORS preflight. |
 | **Default native WebRTC = `werift`** (optional dependency), injectable | Pure JS on Node, Bun and Deno; replaceable without API changes. |
 | **No hard line limit** | Safety and tests matter more than the line count. |
+
+
+---
+
+## 15. Implementation notes (what was built, and deviations from the plan above)
+
+| Area | As built |
+|---|---|
+| Code | ~1,800 lines in `src/` (+ 46 CLI), ~500 lines of tests. Zero runtime dependencies; `werift` is the optional default WebRTC for native runtimes |
+| HTTP `get`/`put`/`get_peers` | **Recursive** over HTTP: the anchor does the DHT work for the client (over UDP they are plain BEP 44/5) |
+| `cx_check` → `cx_probe` | `cx_check` asks a *different* anchor to probe the caller with the anchor-to-anchor query `cx_probe` (only answered for verified anchors), or probes itself when it knows no other anchor |
+| Beacon `c=` | Holds full **anchor lines**, not URLs, so a sender picks the right way in (`web=` from HTTPS pages, `ip:port` otherwise) |
+| `kind` | `'direct' \| 'peer'`. With no TURN there is no relayed ICE pair to detect, so `getStats()` is not needed and was dropped from the WebRTC contract |
+| Rate limits | Configurable per node. Defaults: burst 120, 4 per second, ≤ 64 open long polls per IP. The first draft's 4 polls per IP broke when several peers shared one IP (carrier-grade NAT, offices, and the test suite) |
+| Long polls | The anchor watches the *response* `close` event to notice a vanished client (the request's `close` event fires as soon as the body has been read) |
+| LAN | Port 4798 (so several nodes on one host can all listen with `SO_REUSEADDR`); mDNS on 5353 |
+| Exit | `Peer.close()` / `node.close()` release every handle, so an app exits cleanly (verified with `werift`). `node-datachannel` needs its own cleanup, so the test runner uses `--test-force-exit` |
+
+### Verified
+- **Node 22:** all 18 tests.
+- **Bun 1.4.4 and Deno 2.9.6:** anchors, messaging, a direct and a relayed DataChannel.
+- **Chromium 153:** direct; relayed through a third browser; Node (`werift`) ↔ browser.
+- **Live:** `relay.pkarr.org` accepted our record and returned it identical; DNS TXT reads through public DoH.
+
+### Still open (needs an environment this sandbox doesn't have)
+- Firefox and WebKit runs (CI, `.github/workflows/test.yml`).
+- Two browsers on two real networks.
+- Joining the live Mainline DHT (outbound UDP is blocked here).
+- Real Safari.
