@@ -27,6 +27,7 @@ The protocol ends when `connect()` returns an open DataChannel.
 - [ ] A Beacon published by our code reads back from the public pkarr relay
 - [ ] Two browsers on different networks connect knowing only each other's address, both direct and forced through a peer relay
 - [ ] A Node peer and a browser connect the same way, and so do two Node peers (our WebRTC subset)
+- [ ] The `matrix` CI is green on Chrome, Firefox and Safari (stable + pre-release), and `fallbacks` passes
 - [ ] A fresh node with **no configuration** finds anchors through at least one channel in each row of §4.3
 - [ ] README + `SPEC.md` are written. After that the project only receives bug fixes.
 
@@ -159,7 +160,7 @@ Browsers can't be anchors, but they cache, score and **re-share** the book (invi
 ```
 1 RESOLVE   Beacon of B → B's anchors          2 RELAYS  rv_turn on own anchors → iceServers (STUN+TURN)
 3 OFFER     msg {t:'rtc', sid, fp_A}            4 ANSWER  msg {t:'rtc-ok', sid, fp_B}   (SDP built from the template on both sides)
-5 ICE       trickle msg {t:'rtc-c', sid, c}     6 OPEN    → { channel, pc, relayed }
+5 ICE       trickle msg {t:'rtc-c', sid, c}     6 OPEN    → { channel, pc, kind }
 Errors: 'not-found' | 'no-answer' | 'ice-failed' | 'timeout'
 ```
 Authentication is implicit: only the key holder can decrypt the `rtc` message and derive the ICE password, and the DTLS fingerprints arrive inside authenticated messages.
@@ -190,7 +191,43 @@ The anchor line gains the certificate hash: `rv-anchor:<z32>@<ip>:<port>;fp=<bas
 
 ---
 
-## 7. Files (~3,200 lines total)
+## 6b. Surviving browser updates (Chrome, Firefox, Safari)
+
+**Ground rule:** our own WebRTC code is never the only way to do anything. Each layer has a fallback that uses only standard browser features, so a browser update can at worst make one route slower, never break the project.
+
+### What our DTLS code can and can't break
+| Path | Uses our DTLS? | If it breaks |
+|---|---|---|
+| browser ↔ browser `connect()` | **no**, both sides use the browsers' own stacks | unaffected |
+| discovery, signalling, anchor book in browsers | **no**, also runs over HTTPS POST / `wss` / DoH | unaffected |
+| browser → IP-only anchor (`webrtc-direct`) | yes | browser uses the anchors that have `web=` (HTTPS/`wss`) instead |
+| browser ↔ Node/Bun/Deno peer `connect()` | yes | falls back through the ladder below |
+
+### Fallback ladder for a native ↔ browser connection
+1. **Our subset as DTLS client**, and if the handshake fails, **retry with our side as DTLS server**. We write the SDP template, so we choose the role and can simply try both.
+2. **A standard WebRTC library, if one is installed** (`node-datachannel`, `werift`, or a future built-in `RTCPeerConnection` in Node/Deno/Bun). It's picked up automatically; we never depend on it.
+3. **Message channel:** `connect()` still returns a channel (`kind: 'relay'`), carried as end-to-end encrypted rendezvous messages through the anchors of both peers (sequence numbers, acks, 64 KB/s cap, ~60 lines). It's slow but always works, and it's relayed by peers as the scope allows.
+
+`connect()` result: `{ channel, kind: 'direct' | 'turn' | 'relay' }`. When a route fails, the peer remembers this per browser family and version, so the next attempt skips straight to the route that works.
+
+### Staying inside what browsers can't drop
+- We implement **only the profile WebRTC's own security spec (RFC 8827) requires every endpoint to support:** DTLS 1.2, `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, P-256, SHA-256 fingerprints. A browser that dropped these would break interop with every SFU and with Pion, libwebrtc and str0m endpoints. That can't happen quietly.
+- **DTLS 1.3:** when a browser offers 1.3, we answer 1.2 (standard version negotiation). When we're the client, we offer 1.2 only.
+- **Liberal parsing:** unknown extensions are ignored, coalesced or fragmented records are accepted, and messages arriving out of order are handled.
+
+### Browser differences that don't touch our DTLS (each with a fallback)
+| Feature | Chrome | Firefox | Safari | Fallback |
+|---|---|---|---|---|
+| WebCrypto Ed25519 / X25519 | ✅ | ✅ | ✅ (recent) | `src/crypto-fallback.js`: pure-JS Ed25519/X25519 (~250 lines, ported from TweetNaCl, public domain), loaded only when WebCrypto lacks them |
+| Editing ICE ufrag/pwd in the local SDP | ✅ (tested) | ⚠️ to verify | ⚠️ to verify | if `setLocalDescription` rejects the edit, **send the real ufrag/pwd inside the `rtc` message** (+40 B). Fully standard; editing is only an optimisation |
+| `webrtc-direct` to anchors | needs no SDP editing at all: anchors run **ICE-lite** with a fixed password derived from the anchor's public key. The DTLS fingerprint `fp=` authenticates the anchor; `rv_listen` authenticates the browser | | | HTTPS/`wss` anchors |
+| `negotiated: true` DataChannel id 0 | ✅ | ✅ | ✅ | none needed (standard since 2015) |
+
+### Early warning
+- **Daily CI against pre-release browsers:** Chrome Beta/Dev/Canary, Firefox Beta/Nightly, Playwright WebKit, and **real Safari + Safari Technology Preview** on a macOS runner (driven through `safaridriver` with a ~50-line WebDriver client, so still no dependency). Pre-release builds reach users about 4–12 weeks later, which leaves time to fix things.
+- **Anchors count handshake outcomes** per browser family/major version and serve them at `GET /stats`, so real-world breakage shows up as numbers.
+
+## 7. Files (~3,550 lines total)
 
 | File | Contents | State |
 |---|---|---|
@@ -209,6 +246,9 @@ The anchor line gains the certificate hash: `rv-anchor:<z32>@<ip>:<port>;fp=<bas
 | `src/webrtc/x509.js` | self-signed cert, DER helpers | ⬜ ~80 |
 | `src/webrtc/sctp.js` | SCTP association, one reliable stream, CRC-32c | ⬜ ~400 |
 | `src/webrtc/index.js` | `dial()/accept()` → channel; the same zero-SDP parameters as the browser path | ⬜ ~80 |
+| `src/crypto-fallback.js` | pure-JS Ed25519 + X25519 for old browsers (lazy-loaded) | ⬜ ~250 |
+| `src/relaychan.js` | message-channel fallback (seq/ack/window over rendezvous messages) | ⬜ ~60 |
+| `test/ci/` | WebDriver client for Safari, browser-matrix runner, nightly workflow | ⬜ ~120 |
 | `bin/rv.js`, `src/demo.html`, `anchors.txt` | CLI (`anchor · node · id · anchors · resolve · send · listen`), demo, baked-in list | ✏️ |
 
 ---
@@ -222,7 +262,7 @@ const me = await Peer.create({ seed })          // bootstraps itself via §4.3. 
 me.address
 await me.publish()
 me.listen(({ from, channel }) => {})
-const { channel, relayed } = await me.connect(address)
+const { channel, kind } = await me.connect(address)   // kind: 'direct' | 'turn' | 'relay'
 
 me.anchors()                                    // → anchor lines, best first (string). Share it anywhere
 me.addAnchors(text)                             // merge any text that contains anchor lines
@@ -250,6 +290,8 @@ Native: `rv node` (a peer that promotes itself to an anchor when reachable) or `
 | `browser` | two Chromium pages **served over https** (self-signed test origin): bootstrap via DoH (local resolver), `https` `/anchors.txt` and `webrtc-direct` to an IP-only anchor; KRPC over `POST /krpc`, WebSocket and DataChannel; connect direct and forced-relay |
 | `webrtc-unit` | STUN/MI/FINGERPRINT vectors (RFC 5769), CRC-32c vectors, DTLS PRF vector, SCTP chunk round trips, packet-loss simulation (20% drop) still delivers 1 MB in order |
 | `webrtc-interop` | **our subset ↔ real Chromium** (Playwright), with our side as DTLS client *and* as server; native ↔ native; native ↔ native through TURN only; browser → anchor `webrtc-direct` running KRPC |
+| `fallbacks` | forced DTLS failure → role swap → message channel still delivers; SDP editing disabled → real-credential path connects; WebCrypto Ed25519 hidden → pure-JS fallback produces identical keys and signatures |
+| `matrix` (CI, nightly) | `browser` + `webrtc-interop` on Chrome stable/beta/canary, Firefox stable/beta/nightly, WebKit, Safari + Safari TP |
 | `bun` | `anchor` + `book` + `webrtc-interop` (native side) pass under Bun |
 | `live` (manual) | Beacon via `relay.pkarr.org`; TXT via public DoH; `announce_peer` on real Mainline |
 
