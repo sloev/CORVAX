@@ -1,6 +1,8 @@
 # RENDEZVOUS — Signal Over Anything
 
 > Fix signalling and peer discovery for good.
+> **Revision 2 (Part II, bottom of this file): no servers, no gateways, no required relays. Where Part II conflicts with Part I (§5–§9), Part II wins.**
+>
 > One address per peer that lasts for years. One small signed record. Any transport that can carry **25–100 bytes**.
 
 ---
@@ -319,3 +321,145 @@ dig +https @rv.example.com TXT rv1abc….rv.example.com       # resolve via DNS
 pkarr (DHT records) · Trystero (signalling over public infrastructure) · PeerJS · libp2p (rendezvous, circuit relay, webrtc-direct) · Nostr · WebTorrent trackers · magic-wormhole (PAKE codes) · PairDrop/Snapdrop (same-IP rooms) · Hyperswarm (DHT + hole punching) · Tailscale DERP · Syncthing discovery · Briar (offline transports) · ggwave (audio modem) · Tor v3 (key blinding).
 
 **What makes this different:** one self-certifying record format that works the same way across *every* medium, from the Mainline DHT to a sound in a room, with the browser as the main target and no required server at all.
+
+
+---
+---
+
+# PART II: No servers. No gateways. Peers only.
+
+## 12. What actually exists (checked November 2026)
+
+| Question | Answer |
+|---|---|
+| Can Cloudflare Workers use UDP or QUIC? | **No.** Outbound TCP (`connect()`) only. Inbound TCP and gRPC are in private beta, and UDP is listed as "next". |
+| Does iroh solve it in the browser? | **No.** iroh in WASM is **relay-only**, because browsers can't send UDP to arbitrary addresses. iroh's own FAQ says WebRTC is the only option for hole punching in browsers. |
+| So what *can* a browser use for UDP? | **WebRTC** (and **WebTransport**, which is QUIC). Both can reach a native peer **directly, with no signalling server**: |
+
+**The key point:** a browser can open WebRTC to a native peer using only that peer's `IP:port` and DTLS fingerprint. The browser builds the SDP locally (the trick from §2, already tested in Chromium). The native peer learns the browser's address from the incoming STUN check, and derives the browser's ICE credentials from the ufrag in that check. libp2p already runs this in production as **`/webrtc-direct`**.
+
+So there are **no gateways**, only **peers that happen to be dialable**. A browser needs one reachable native peer (38 bytes: `IPv4:port` 6 B + fingerprint 32 B). After that, everything runs over the peer network.
+
+A second option for browsers: **WebTransport with `serverCertificateHashes`**. This is QUIC to a native peer with a self-signed certificate (ECDSA, valid ≤ 14 days, its hash published in the peer's Beacon). It needs no certificate authority and no domain name. Support in Safari still needs checking.
+
+---
+
+## 13. One codebase, three roles (capabilities, not servers)
+
+Every node runs the **same Rust core**. A node's role depends only on what it can do:
+
+| Role | Who | Can do |
+|---|---|---|
+| **Anchor** | Any native node that is publicly reachable (public IPv4, IPv6, or a port opened with UPnP/NAT-PMP/PCP) | Full DHT node · accepts WebRTC-direct/WebTransport from browsers · answers STUN · can relay |
+| **Native peer** | Native node behind NAT | DHT client · hole punching · relays for its contacts |
+| **Browser peer** | A tab or PWA | Connects to anchors with zero signalling · light DHT node (client mode, promoted to server mode after N minutes of uptime) · forwards Letters and relays for other browsers over DataChannels |
+| Worker *(optional)* | Cloudflare | Just an HTTPS cache of Beacons. **Nothing depends on it.** |
+
+```
+rv-proto   (Rust, no_std + alloc, sans-IO: pure state machines, no sockets, no async runtime)
+  ├─ identity, Beacon, Letter, SDP-lite, key derivation from K_ab
+  ├─ Kademlia routing table + query state machine
+  ├─ range-based set reconciliation
+  └─ NAT traversal + relay selection state machine
+rv-native  tokio UDP · `mainline` crate (BitTorrent DHT + BEP44) · str0m (sans-IO WebRTC: webrtc-direct listener)
+           · STUN/TURN-lite · igd / natpmp / pcp port mapping · mDNS / broadcast / BLE   → binary `rvd`
+rv-web     wasm-bindgen · RTCPeerConnection + WebTransport are the "sockets" · IndexedDB storage   → npm `rendezvous`
+rv-ffi     UniFFI → Swift, Kotlin, Python; C ABI for everything else
+```
+
+Because the core is sans-IO (it never opens sockets itself), **the same lookup and NAT code runs in a browser, on a phone, on a server and on an ESP32**. Only the thin driver layer differs.
+
+---
+
+## 14. Global lookup: DHT and the alternatives
+
+| Option | Global? | Browser can join directly? | Cost | Verdict |
+|---|---|---|---|---|
+| **Mainline DHT** (BEP44 / pkarr) | ✅ ~10M nodes, ~20 years old | ❌ UDP only | $0 | **Use it.** Anchors publish and resolve here. It's the global phone book that already exists. |
+| **IPFS Amino DHT** (IPNS = Ed25519-signed records) | ✅ | ⚠️ some nodes accept WebTransport/webrtc-direct | $0 | Secondary backend. Worth adding later. |
+| **Own Kademlia overlay** (same key space as our addresses) | ✅ once it grows | ✅ over WebRTC | $0 | **Build it, small.** It's what lets browsers be real participants. |
+| Gossip (HyParView + Plumtree, as in iroh-gossip) | topics only | ✅ | $0 | Use for group/topic rooms, not for looking up one key |
+| One-hop DHT (Kelips, ~√n state per node) | ✅ | ✅ | $0 | Option for later if lookup latency matters |
+| Full replication + Merkle sync | doesn't scale to billions | ✅ | $0 | Good for *neighbourhoods* (see below) |
+| Nostr / trackers / MQTT | ✅ | ✅ | $0 | Kept only as optional fallback carriers |
+| Blockchains | ✅ | via a gateway | 💸 | No |
+
+**The design:**
+1. **rv overlay = tiny Kademlia** (k=20, α=3) using Ed25519 public keys as IDs and **XOR distance, the same as Mainline**. Its only messages are `PING`, `FIND_NODE`, `GET_BEACON`, `PUT_BEACON` and `FORWARD_LETTER`. It runs over UDP between native nodes and over DataChannels to browsers.
+2. **Every anchor also joins Mainline** and stores/reads the same pkarr Beacons there. Any one anchor connects the two networks, and since records are signed **you never need to trust the anchor**. Browsers ask 3 anchors in parallel and keep the highest valid `seq`.
+3. **When the rv overlay is small, Mainline does the work. As it grows, the overlay takes over.** Either way the address is the same.
+
+### Where Merkle trees help (and where they don't)
+- **Not for trust.** Beacons are self-certifying, so a Merkle proof adds nothing.
+- **For replication:** each anchor keeps every Beacon in its XOR neighbourhood. It stays in sync with its neighbours using **range-based set reconciliation** (Negentropy / RBSR: a Merkle-like fingerprint over sorted key ranges). The cost is O(differences · log n), so a node can drop offline for a day and catch up with a few kilobytes. With this the network survives churn without Mainline's 2-hour republish cycle.
+- **For key-rotation safety:** `moved-to` pointers go into a **Merkle transparency log** (Certificate Transparency style, Merkle Mountain Range), gossiped by anchors. A stolen key can still announce a "move", but the move is public and visible to everyone, and the real owner can contest it within a grace period.
+
+---
+
+## 15. Getting rid of relay *servers*
+
+Order of attempts. Each step is tried in parallel with the next one, and the first that works wins:
+
+| # | Method | Works for | Needs |
+|---|---|---|---|
+| 1 | **Same LAN** (host candidates, mDNS) | everyone | nothing |
+| 2 | **IPv6 direct** (often no NAT at all, only a firewall, which simultaneous open gets through) | most mobile networks and many home ISPs | nothing |
+| 3 | **Port mapping** (UPnP-IGD / NAT-PMP / PCP) turns a native peer into an anchor | native peers on home routers | nothing |
+| 4 | **Hole punching coordinated by a third peer.** Letters travel through the overlay. Every anchor answers STUN, so browsers set `iceServers: [{urls: 'stun:<anchor>'}]` with **our peers instead of Google's STUN servers** | cone NATs (most) | any anchor |
+| 5 | **Birthday-paradox punching** (native only). One side opens 256 ports, the other sends probes to random ports. The success rate is high within seconds (this is Tailscale's technique) | symmetric NAT ↔ cone NAT | native on ≥ 1 side |
+| 6 | **Peer relay.** A third *peer* relays end-to-end encrypted bytes it can't read | everything else | a willing peer |
+
+### How step 6 works without any server
+- **The relay is picked deterministically, with no coordination:** both sides independently choose the online anchor whose ID is XOR-closest to `H(K_ab)`. They agree without sending a single message, and the load spreads evenly over the network.
+- **Anchors provide TURN-lite.** Browsers already support TURN in `iceServers`, and the TURN credentials are derived from `K_ab`. To the browser it looks like a normal TURN server, but it's just a peer.
+- **Browser ↔ browser through a third browser:** DataChannel forwarding with a Noise end-to-end layer inside, so the relaying browser only sees ciphertext.
+- **Friends as TURN:** prefer relays from your own contact graph (people you have connected with before), then friends of friends, then strangers. Each node sets its own bandwidth cap. Reciprocity credits ("I relayed 50 MB for you") decide who gets priority.
+- **Multipath (later):** split the stream over 2–3 relays with erasure coding, so no single relay sees all the traffic or can stall the connection.
+
+The one physical limit: **two browsers, both behind symmetric NAT (common on mobile carrier-grade NAT), cannot connect directly.** Then a third peer has to relay, but it's a *peer*, not a server.
+
+---
+
+## 16. Bootstrapping with no server (checked in this order)
+
+1. **Peer cache in IndexedDB or on disk.** After the first run you never need a bootstrap again.
+2. **Invite links carry anchors:** `rv1…?via=<38-byte anchor descriptor, base64url>` × 2–3. Whoever invites you bootstraps you, if their device (or a friend's) is reachable.
+3. **Anchors compiled into the app or npm package**, refreshed from a signed list on each release.
+4. **DNS TXT via any public DoH resolver** (`_anchors.rv.<domain>`). The resolver is public infrastructure; we don't run it.
+5. **Native only:** Mainline's own bootstrap nodes, then `FIND_NODE` toward rv nodes. LAN mDNS/broadcast.
+6. **Offline:** a QR code or audio chirp containing an anchor descriptor or a peer's one-shot Letter (§3b).
+
+---
+
+## 17. Wild ideas, ranked by "this might actually work"
+
+1. ✅ **Zero-signalling dial** to any anchor (tested in Chromium, used in production by libp2p).
+2. 🔥 **The DHT as a mailbox:** derive an Ed25519 keypair from `H(K_ab ‖ hour ‖ direction)` and write the Letter as a **BEP44 mutable item on Mainline**. Both peers can derive the key; nobody else can link it to them. **Signalling through 10M BitTorrent nodes, with zero rv infrastructure.** Latency is a few seconds (native only; browsers do the same via anchors).
+3. 🔥 **Deterministic relay rendezvous** (§15): two peers pick the same third peer without exchanging any messages.
+4. 🔥 **Friends as TURN:** your contact graph is your relay network.
+5. **Uptime-ranked browser DHT nodes:** tabs start as clients and get promoted after proving they stay online. Kademlia already prefers long-lived nodes, so this is safe.
+6. **Vivaldi network coordinates:** every node keeps a 2–3-dimensional latency coordinate (updated for free from RTTs it already sees). This lets a node pick the *nearest* anchor or relay without measuring.
+7. **Merkle-synced neighbourhoods + transparency log** (§14).
+8. **Sybil/eclipse resistance:** S/Kademlia disjoint lookup paths, a small proof-of-work on node IDs, and node IDs tied to the IP's /24 subnet.
+9. **WebTransport with certificate hashes:** browsers talking QUIC directly to peers.
+10. **Birthday-paradox punching from a phone:** native apps get it for free from the Rust core.
+
+---
+
+## 18. Revised roadmap (replaces §9)
+
+| Phase | Deliverable | "Done" means |
+|---|---|---|
+| **0. Spec** | addresses, Beacon, Letter, anchor descriptor (38 B), overlay messages, test vectors | Two implementations agree on the vectors |
+| **1. First anchor** | `rv-proto` + `rvd`: Mainline/pkarr + webrtc-direct listener (str0m) + STUN | **A browser on 4G resolves a Beacon through a home anchor. No server of ours is involved.** |
+| **2. Browser ↔ browser** | Letters routed through the overlay, anchors as STUN, zero-SDP dial | Two browsers on different NATs connect knowing only each other's `rv1…` addresses |
+| **3. No relay servers** | TURN-lite on anchors, DataChannel forwarding, deterministic relay choice, friends-as-TURN | Two symmetric-NAT phones connect through a third peer |
+| **4. The overlay** | Kademlia over UDP + WebRTC, browser promotion, RBSR neighbourhood sync | 1000 simulated nodes with 50% churn: lookups succeed > 99% |
+| **5. DHT mailbox** | BEP44 Letters on Mainline | Two native peers connect with only Mainline in between |
+| **6. LAN / offline / bindings** | mDNS, broadcast, BLE, QR, audio, UniFFI | Python ↔ browser ↔ iOS using the same address |
+| **7. Wild** | transparency log, Vivaldi, multipath relays, WebTransport | 🎉 |
+
+### Sources for §12
+- Workers TCP sockets: https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/ · inbound TCP/gRPC beta, UDP "next": https://www.infoq.com/news/2026/08/workers-inbound-tcp-grpc
+- iroh in the browser is relay-only: https://docs.iroh.computer/deployment/wasm-browser-support
+- libp2p WebRTC-direct (no signalling): https://blog.libp2p.io/libp2p-webrtc-browser-to-server
