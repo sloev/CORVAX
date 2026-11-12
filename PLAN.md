@@ -21,7 +21,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 - anything on top of a DataChannel
 - rooms, history, durable or acknowledged messaging, group encryption
 - gossip beyond bounded broadcast, introductions, reputation, incentives, telemetry, central services
-- our own WebRTC stack, TURN, WebSocket, WebTransport, UPnP, DNS servers, ICMP
+- our own WebRTC stack, TURN, WebTransport, UPnP, DNS servers, ICMP; WebSocket except an anchor's `/relay`
 - BEP 5 as a topic index
 
 ## Decisions
@@ -33,6 +33,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 | Separate X25519 key; sealed-sender signed messages | Standard crypto; sender attribution; no reflection |
 | Full SDP offer/answer | Works across browsers and native WebRTC libraries |
 | Relay through any peer by default; no TURN | Connects whenever any path exists, without relay servers |
+| Anchors also relay over WebSocket (`/relay`), only as a last resort | Works where WebRTC can't (Workers); same bridge protocol, tight limits |
 | HTTP POST + long polls | One client transport for every runtime |
 | Any peer may store; placement 4 established-closest + 1 random | Uniform protocol; fresh keys can't eclipse a topic |
 | Absolute `exp`, tombstones, skew from storage clocks | Replays can't revive a provider; bad clocks self-correct |

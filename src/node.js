@@ -133,7 +133,7 @@ export class CorvaxNode {
         ['http', await post(e.web || hostUrl(e), 'cx_hi', { n }).catch(() => null)]]) {
         if (!this.book.get(e.key)) return
         if (r && !await hiOk(r, key, n)) return this.book.record(e.key, 'id', false)    // someone else's key: dropped
-        if (r) { this.book.record(e.key, 'id', true); this.book.get(e.key).storage = !!r.st }
+        if (r) { this.book.record(e.key, 'id', true); Object.assign(this.book.get(e.key), { storage: !!r.st, relay: !!r.rl }) }
         this.book.record(e.key, service, !!r, Date.now() - t0)
       }
     }))

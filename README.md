@@ -39,7 +39,7 @@ npx corvax anchors                   # print the anchor book
 
 - **Browsers** opening a node's `/` get its homepage. Its **Go live** button turns the page into a working peer: messages, chat, topics.
 - **`curl -s http://node:4799/`** gets the plain anchor list.
-- **Cloudflare Worker anchor:** `npx wrangler deploy` in this repo (HTTPS only: inboxes, topic storage, Beacons mirrored to Mainline via pkarr; no UDP, so no DHT routing, STUN or relaying). Optional fixed key: `wrangler secret put CORVAX_SEED` (64 hex chars). Check it with `node test/worker-check.js https://corvax.<account>.workers.dev`.
+- **Cloudflare Worker anchor:** `npx wrangler deploy` in this repo (HTTPS only: inboxes, topic storage, Beacons mirrored to Mainline via pkarr, and a rate-limited WebSocket relay as a last resort; no UDP, so no DHT routing or STUN). Optional fixed key: `wrangler secret put CORVAX_SEED` (64 hex chars). Check it with `node test/worker-check.js https://corvax.<account>.workers.dev`.
 - **HTTPS pages** need an anchor with an HTTPS origin: `cloudflared tunnel --url http://localhost:4799`, then `--web https://…`.
 - **A direct connection reveals your IP** to the peer you connect to.
 

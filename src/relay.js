@@ -3,11 +3,12 @@
 //   B → A   msg {cx:'via',  sid, e: eph_b, c: chosen C}      (or {cx:'via-no'})
 //   A, B → C  on the control channel: {cx:'bridge', sid, to: other}; C pairs them → {cx:'bridged'}
 //   frames  sid 9 | counter 8 | AES-GCM_Kdir(type 1 | data)   — end-to-end; C only sees ciphertext
-import { ephemeral, ecdh, hkdf, aesKey, encrypt, decrypt } from './crypto.js'
-import { b64, unb64, random, concat, utf8, str, u64, readU64, fail, toWire, bytesOf } from './bytes.js'
+import { ephemeral, ecdh, hkdf, aesKey, encrypt, decrypt, sign, verify } from './crypto.js'
+import { b64, unb64, random, concat, utf8, str, u64, readU64, z32, fail, toWire, bytesOf } from './bytes.js'
 import * as rtc from './rtc.js'
 
-const MAX_FRAME = 16 * 1024, HOUR_BYTES = 1e9, IDLE = 120e3
+const MAX_FRAME = 16 * 1024, IDLE = 120e3
+const known = (peer, a) => peer.conns.get(a) || peer.wsRelays?.get(a)
 const waiters = new Map()      // sid -> { resolve, reject } for A waiting on B's answer
 
 // A: ask B to meet through a third peer
@@ -24,7 +25,7 @@ export async function via (peer, address, { timeout = 30000, purpose = 'app', tp
   try {
     await peer.signal(address, { cx: 'via?', sid, e: b64(eph.pub), via: list, p: purpose, ...(tp && { tp }) }, beacon)
     const r = await answer
-    const conn = peer.conns.get(r.c) || await connTo(peer, r.c)
+    const conn = known(peer, r.c) || await connTo(peer, r.c).catch(() => wsTo(peer, r.c))
     const ch = await RelayChannel.create(peer, conn, sid, eph.priv, unb64(r.e), 'a')
     conn.ctl.send(JSON.stringify({ cx: 'bridge', sid, to: address }))
     await ch.ready(timeout)
@@ -33,6 +34,38 @@ export async function via (peer, address, { timeout = 30000, purpose = 'app', tp
 }
 
 const connTo = (peer, address) => rtc.direct(peer, address, { purpose: 'relay', timeout: 8000 }).then(() => peer.conns.get(address))
+
+// Last resort: an anchor's WebSocket relay (GET /relay). Same bridge protocol, after a signed hello.
+async function wsTo (peer, key) {
+  if (peer.wsRelays.has(key)) return peer.wsRelays.get(key)
+  const e = peer.book.get(key), url = e?.relay && peer.urlOf(e)
+  if (!url) throw fail('no-relay', 'not a relay anchor')
+  const ws = new WebSocket(url.replace(/^http/, 'ws').replace(/\/$/, '') + '/relay')
+  ws.binaryType = 'arraybuffer'
+  await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(fail('no-relay', 'relay socket failed')) })
+  const ts = Date.now()
+  ws.send(JSON.stringify({ cx: 'hello', k: b64(peer.id.pub), ts, sig: b64(await sign(peer.id, utf8(`cx-relay:${ts}`))) }))
+  const conn = { address: key, ctl: { send: d => ws.send(d) }, ws }
+  ws.onmessage = ev => onControl(peer, conn, ev.data)
+  ws.onclose = () => { if (peer.wsRelays.get(key) === conn) peer.wsRelays.delete(key); onClosed(peer, conn) }
+  peer.wsRelays.set(key, conn)
+  return conn
+}
+
+// The anchor side of /relay, shared by every anchor implementation. ws: { send, close, onmessage, onclose }.
+export function serveSocket (host, ws) {
+  const conn = { address: null, ctl: { send: d => ws.send(d) } }
+  let queue = Promise.resolve()
+  ws.onmessage = data => { queue = queue.then(async () => {
+    if (conn.address) return onControl(host, conn, data)
+    let m
+    try { m = JSON.parse(data) } catch { return ws.close() }
+    const k = typeof m.k === 'string' ? unb64(m.k) : null
+    if (m.cx !== 'hello' || k?.length !== 32 || Math.abs(Date.now() - m.ts) > 300e3 || !await verify(k, unb64(String(m.sig)), utf8(`cx-relay:${m.ts}`))) return ws.close()
+    conn.address = z32(k)
+  }).catch(() => {}) }
+  ws.onclose = () => onClosed(host, conn)
+}
 
 // B: pick C, answer A, ask C to bridge
 export async function onSignal (peer, from, body) {
@@ -44,12 +77,11 @@ export async function onSignal (peer, from, body) {
   if (!tp && !peer.acceptors.size) return
   if (tp && !peer.topics.accept(from, tp)) return peer.signal(from, { cx: 'via-no', sid }).catch(() => {})
   const list = body.via.map(String).filter(a => /^[a-z0-9]{52}$/.test(a) && a !== peer.address && a !== from).slice(0, 8)
-  let c = list.find(a => peer.conns.has(a))
-  for (const a of c ? [] : list) {
-    try { await connTo(peer, a); c = a; break } catch {}
-  }
+  let c = list.find(a => known(peer, a))
+  for (const a of c ? [] : list) { try { await connTo(peer, a); c = a; break } catch {} }
+  for (const a of c ? [] : list.filter(a => peer.book.get(a)?.relay)) { try { await wsTo(peer, a); c = a; break } catch {} }
   if (!c) { if (tp) peer.topics.release(from, tp); return peer.signal(from, { cx: 'via-no', sid }).catch(() => {}) }
-  const eph = await ephemeral(), conn = peer.conns.get(c)
+  const eph = await ephemeral(), conn = known(peer, c)
   const ch = await RelayChannel.create(peer, conn, sid, eph.priv, unb64(String(body.e)), 'b')
   await peer.signal(from, { cx: 'via', sid, e: b64(eph.pub), c })
   conn.ctl.send(JSON.stringify({ cx: 'bridge', sid, to: from }))
@@ -60,7 +92,7 @@ export async function onSignal (peer, from, body) {
 
 // C (and endpoints): control channel traffic
 export function onControl (peer, conn, data) {
-  if (typeof data === 'string' && data[0] === 'K') return peer.onChanText(conn.ctl, data)   // KRPC over WebRTC
+  if (typeof data === 'string' && data[0] === 'K') return peer.onChanText?.(conn.ctl, data)   // KRPC over WebRTC
   if (typeof data === 'string') {
     let m
     try { m = JSON.parse(data) } catch { return }
@@ -86,7 +118,7 @@ export function onControl (peer, conn, data) {
   b.inWindow += bytes.length; b.last = now
   peer.relayBytes = (peer.relayHour === Math.floor(now / 3600e3) ? peer.relayBytes : 0) + bytes.length
   peer.relayHour = Math.floor(now / 3600e3)
-  if (b.inWindow > peer.limits.kbps * 125 * 2 || peer.relayBytes > HOUR_BYTES) return endBridge(peer, sid)
+  if (b.inWindow > peer.limits.kbps * 125 * 2 || peer.relayBytes > (peer.limits.hourBytes ?? 1e9)) return endBridge(peer, sid)
   try { (conn === b.a ? b.b : b.a).ctl.send(toWire(bytes)) } catch { endBridge(peer, sid) }
 }
 

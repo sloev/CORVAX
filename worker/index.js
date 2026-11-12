@@ -1,5 +1,5 @@
 // CORVAX anchor on Cloudflare Workers. Same HTTP protocol as a native anchor, minus what needs UDP or WebRTC
-// (DHT routing, STUN, LAN, cx_check, relaying). Beacons are kept here and mirrored to the Mainline DHT
+// (DHT routing, STUN, LAN, cx_check). Relays only over WebSocket, as a rate-limited last resort. Beacons are kept here and mirrored to the Mainline DHT
 // through a pkarr relay. Key: secret CORVAX_SEED (hex), or generated once and kept in Durable Object storage.
 import { DurableObject } from 'cloudflare:workers'
 import { identity, hiOk, random, sha1, verify } from '../src/crypto.js'
@@ -9,10 +9,13 @@ import { Inboxes } from '../src/inbox.js'
 import { Book, formatLine } from '../src/book.js'
 import { homepage } from '../src/home.js'
 import { pack, unpack, verifyBeacon } from '../src/record.js'
+import { serveSocket } from '../src/relay.js'
 import { hex, unhex, utf8, str, z32, unz32, equal } from '../src/bytes.js'
 import favicon from '../assets/logo/favicon.ico'
 
 const RELAY = 'https://relay.pkarr.org', CORS = { 'access-control-allow-origin': '*' }
+// WebSocket relaying is a last resort here: few, slow sessions and a small hourly budget.
+const RELAYING = { sessions: 4, kbps: 256, hourBytes: 200e6, socketsPerIp: 2, opensPerIpMinute: 6 }
 const COST = { put: 6, cx_tpub: 2, cx_send: 1, cx_tfind: 1, get: 1 }
 
 export default {
@@ -31,6 +34,8 @@ export class Anchor extends DurableObject {
   constructor (ctx, env) {
     super(ctx, env)
     Object.assign(this, { inboxes: new Inboxes(), store: new TopicStore(), book: new Book(), beacons: new Map(), buckets: new Map(), replays: new Map(), started: Date.now(), swept: 0 })
+    this.relayHost = { relayFor: true, bridges: new Map(), channels: new Map(), limits: RELAYING }
+    this.sockets = new Map()                                     // ip -> { open, opens: [times] }
     this.ready = ctx.blockConcurrencyWhile(async () => {
       const seed = env.CORVAX_SEED || await ctx.storage.get('seed') || hex(random(32))
       await ctx.storage.put('seed', seed)
@@ -48,6 +53,7 @@ export class Anchor extends DurableObject {
     if (Date.now() - this.swept > 30e3) { this.swept = Date.now(); this.store.sweep(); this.inboxes.sweep() }
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: { ...CORS, 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'content-type' } })
     if (req.method === 'POST' && url.pathname === '/krpc') return this.krpc(req, origin, ip)
+    if (url.pathname === '/relay' && req.headers.get('upgrade') === 'websocket') return this.relay(ip)
     if (req.method !== 'GET' || url.pathname !== '/') return new Response(null, { status: 404, headers: CORS })
     const headers = { ...CORS, vary: 'accept' }
     if (!/text\/html/.test(req.headers.get('accept') || '')) return new Response(this.listing(origin) + '\n', { headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' } })
@@ -87,7 +93,7 @@ export class Anchor extends DurableObject {
 
   async answer (q, a, origin, signal) {
     if (q === 'ping') return {}
-    if (['cx_hi', 'cx_tpub', 'cx_tfind'].includes(q)) return serve({ id: this.id, store: this.store, line: this.line(origin) }, q, a)
+    if (['cx_hi', 'cx_tpub', 'cx_tfind'].includes(q)) return serve({ id: this.id, store: this.store, line: this.line(origin), relay: true }, q, a)
     if (q === 'cx_anchors') { if (a.me instanceof Uint8Array && a.me.length <= 255) this.ctx.waitUntil(this.learn(str(a.me))); return { a: this.listing(origin) } }
     if (q === 'cx_send') {
       if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > 4096) throw [203, 'bad message']
@@ -126,6 +132,20 @@ export class Anchor extends DurableObject {
     }
     if (q === 'get_peers') return { values: [] }
     throw [204, 'not available on this anchor']
+  }
+
+  relay (ip) {
+    const s = this.sockets.get(ip) || { open: 0, opens: [] }, now = Date.now()
+    s.opens = s.opens.filter(t => now - t < 60e3)
+    if (s.open >= RELAYING.socketsPerIp || s.opens.length >= RELAYING.opensPerIpMinute) return new Response('relay busy', { status: 429, headers: CORS })
+    s.open++; s.opens.push(now); this.sockets.set(ip, s)
+    const [client, server] = Object.values(new WebSocketPair())
+    server.accept()
+    const ws = { send: d => server.send(d), close: () => server.close(), onmessage () {}, onclose () {} }
+    serveSocket(this.relayHost, ws)
+    server.addEventListener('message', e => ws.onmessage(e.data))
+    server.addEventListener('close', () => { s.open--; ws.onclose() })
+    return new Response(null, { status: 101, webSocket: client })
   }
 
   keep (rec) {

@@ -12,7 +12,7 @@ An **anchor** is a peer with an independently reachable public endpoint (UDP and
 
 Anchors have no authority. Everything they hold is signed by its owner and verified by its reader.
 
-An **HTTPS-only anchor** (e.g. the Cloudflare Worker in `worker/`) serves everything in §3–§6 that runs over HTTP: inboxes, topic storage, `cx_anchors`, and Beacons, which it mirrors to Mainline through a pkarr relay. It has no UDP, so no DHT routing, STUN, `cx_check` or relaying. Its line uses port 443 and `web=`.
+An **HTTPS-only anchor** (e.g. the Cloudflare Worker in `worker/`) serves everything that runs over HTTP: inboxes, topic storage, `cx_anchors`, the `/relay` WebSocket, and Beacons, which it mirrors to Mainline through a pkarr relay. It has no UDP, so no DHT routing, STUN or `cx_check`. Its line uses port 443 and `web=`.
 
 ## 2. Identity and records
 
@@ -62,7 +62,7 @@ Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabl
 |---|---|---|
 | `ping`, `find_node`, `get_peers`, `announce_peer` | BEP 5 | anchors announce on `SHA1("corvax anchors v1")` |
 | `get`, `put` | BEP 44 | Beacons |
-| `cx_hi` | `{n ≤ 64 B}` → `{k, sig, line?, st?}` | `sig = Ed25519("cx-hi" ‖ n)`; `st: 1` = stores topic records |
+| `cx_hi` | `{n ≤ 64 B}` → `{k, sig, line?, st?, rl?}` | `sig = Ed25519("cx-hi" ‖ n)`; `st: 1` = stores topic records; `rl: 1` = WebSocket relay at `/relay` |
 | `cx_anchors` | `{me?}` → `{a}` | own line + best 32 + 8 random lines; `me` introduces the caller |
 | `cx_check` | `{k, port, hport}` → `{udp, http, ip, by}` | asks a different anchor (`cx_probe`) to `cx_hi` the caller |
 | `cx_probe` | `{ip, port, hport, k}` → `{udp, http}` | only for callers that are verified anchors |
@@ -142,6 +142,7 @@ Each connection is standard WebRTC with negotiated DataChannels id 0 (payload) a
 1. A → B: `{cx:"via?", sid, e: eph_a, via: [≤ 8 addresses], p, tp?}`.
 2. B → A: `{cx:"via", sid, e: eph_b, c}` or `{cx:"via-no", sid}`. B picks C: one it is connected to, otherwise the first it can reach directly.
 3. A and B each send C, on its `cx` channel, `{"cx":"bridge","sid","to"}`. C pairs requests with the same `sid` that name each other over two different connections, and answers `bridged` (or `bridge-no`); `unbridge` ends it.
+   **Last resort:** when no peer path exists, C may be an anchor with `rl: 1`, reached over a WebSocket at `GET /relay`. The client first sends `{"cx":"hello","k":b64(ed_pub),"ts","sig":b64(Ed25519("cx-relay:" ‖ ts))}` (±300 s), then the same bridge messages and frames as on a `cx` channel.
 4. Frames: `sid 9 ‖ ctr 8 ‖ AES-256-GCM(K_dir, iv 0⁴ ‖ ctr, type ‖ data)`, with `K_a2b`/`K_b2a` = HKDF(X25519(eph_a, eph_b), "cx/relay" ‖ sid ‖ "a2b"/"b2a"). Counters only increase. C only sees ciphertext.
 
 **Topic links:**
@@ -165,7 +166,7 @@ sig   = Ed25519("cx-tb" ‖ bencode{ t, id, ts, from, body })        hop is not 
 | HTTP per IP | token bucket, burst 120, 4/s; costs: `put` 6, `cx_check` 12, `cx_tpub` 2, `cx_send`/`get`/`get_peers`/`cx_tfind` 1, others 0.5; ≤ 64 open long polls |
 | DHT | K = 8, α = 3; ≤ 1000 routing entries; items 2 h; ≤ 200 peers per info_hash, 30 min; tokens SHA1(secret ‖ 10-min window ‖ ip), current or previous window |
 | Beacons | republished every 30 min |
-| Relaying | browsers ≤ 2 sessions at 256 kbit/s, natives ≤ 16 at 2 Mbit/s; bursts above 2× close the session; ≤ 1 GB per hour; idle 120 s; frames ≤ 16 KB |
+| Relaying | browsers ≤ 2 sessions at 256 kbit/s, natives ≤ 16 at 2 Mbit/s; bursts above 2× close the session; ≤ 1 GB per hour; idle 120 s; frames ≤ 16 KB. Worker anchor: ≤ 4 sessions at 256 kbit/s, ≤ 200 MB per hour, per IP ≤ 2 open relay sockets and ≤ 6 new per minute |
 
 ## 9. `RTCPeerConnection` contract
 

@@ -105,11 +105,11 @@ export class TopicStore {
 }
 
 // cx_hi and the storage queries, answered identically by every peer over UDP, HTTP and WebRTC.
-export async function serve ({ id, store, line, stored }, q, a) {
+export async function serve ({ id, store, line, relay, stored }, q, a) {
   const list = (x, max, ok) => Array.isArray(x) ? x.filter(ok).slice(0, max) : []
   if (q === 'cx_hi') {
     if (!(a.n instanceof Uint8Array) || a.n.length > 64) throw [203, 'bad nonce']
-    return { k: id.pub, sig: await sign(id, concat(utf8('cx-hi'), a.n)), ...(line && { line }), ...(store && { st: 1 }) }
+    return { k: id.pub, sig: await sign(id, concat(utf8('cx-hi'), a.n)), ...(line && { line }), ...(store && { st: 1 }), ...(relay && { rl: 1 }) }
   }
   if (q !== 'cx_tpub' && q !== 'cx_tfind') throw [204, 'method unknown']
   if (!store) throw [204, 'storage disabled on this peer']

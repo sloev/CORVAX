@@ -65,3 +65,22 @@ test('bridge pairing rules and limits', () => {
   assert.deepEqual(B.out.at(-1), { cx: 'unbridge', sid })
   clearInterval(peer.bridges.get(sid)?.idle)
 })
+
+test('last resort: an anchor\'s WebSocket relay, when no peer path exists', async t => {
+  const c = await node({ anchor: 'force' })
+  const A = await Peer.create({ anchors: [c.line()], allowPrivate: true, relayFor: false })
+  const B = await Peer.create({ anchors: [c.line()], allowPrivate: true, relayFor: false })
+  t.after(async () => { await A.close(); await B.close(); await c.close() })
+  await A.publish(); await B.publish()
+  assert.equal(A.book.get(c.key).relay, true, 'anchor advertises rl in cx_hi')
+  for (const [x, y] of [[A, B], [B, A], [A, c.peer], [B, c.peer]]) x.blockDirect.add(y.address)   // no WebRTC path at all
+  const incoming = new Promise(resolve => B.accept(resolve))
+  const { channel, kind, via } = await A.connect(B.address, { timeout: 4000 })
+  assert.deepEqual([kind, via], ['peer', c.key])
+  assert.ok(A.wsRelays.has(c.key) && B.wsRelays.has(c.key), 'both reached the anchor over WebSocket')
+  const { channel: bch } = await incoming
+  bch.onmessage = e => bch.send('pong:' + e.data)
+  const back = new Promise(resolve => { channel.onmessage = e => resolve(e.data) })
+  channel.send('over ws')
+  assert.equal(await back, 'pong:over ws')
+})

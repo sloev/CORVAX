@@ -12,6 +12,8 @@ import { homepage } from './home.js'
 import { Inboxes } from './inbox.js'
 export { Inboxes }
 import { serve } from './store.js'
+import { serveSocket } from './relay.js'
+import { createHash } from 'node:crypto'
 
 const BODY_MAX = 8192
 const COST = { put: 6, cx_check: 12, cx_tpub: 2, cx_send: 1, cx_tfind: 1, cx_listen: 0.5, cx_twatch: 0.5, get: 1, get_peers: 1 }
@@ -20,7 +22,7 @@ const srcDir = new URL('./', import.meta.url), logoDir = new URL('../assets/logo
 
 export function installHandlers (node) {
   const h = node.dht.handlers
-  const ctx = () => ({ id: node.id, store: node.store, line: node.line(), stored: raw => node.peer?.topics.local(raw).catch(() => {}) })
+  const ctx = () => ({ id: node.id, store: node.store, line: node.line(), relay: !!node.peer?.relayFor, stored: raw => node.peer?.topics.local(raw).catch(() => {}) })
   for (const q of ['cx_hi', 'cx_tpub', 'cx_tfind']) h[q] = a => serve(ctx(), q, a)
   h.cx_anchors = async (a, from) => {
     if (a.me instanceof Uint8Array && a.me.length <= 255) node.book.add(str(a.me))
@@ -169,6 +171,10 @@ export function httpServer (node) {
     } catch { if (!res.headersSent) res.statusCode = 400; res.end() }
   })
   server.requestTimeout = 40e3
+  server.on('upgrade', (req, socket) => {
+    if (new URL(req.url, 'http://x').pathname !== '/relay' || !node.peer?.relayFor) return socket.destroy()
+    serveSocket(node.peer, websocket(req, socket))
+  })
   return server
 }
 
@@ -186,3 +192,32 @@ function readBody (req) {
   })
 }
 function reply (res, m) { res.end(encode(m)) }
+
+// Minimal RFC 6455 server socket: text and binary messages, ping/pong, close. Frames ≤ 64 KB.
+function websocket (req, socket) {
+  const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`)
+  const frame = (op, data) => {
+    const n = data.length, head = n < 126 ? [0x80 | op, n] : [0x80 | op, 126, n >> 8, n & 255]
+    if (n < 65536 && !socket.destroyed) socket.write(Buffer.concat([Buffer.from(head), data]))
+  }
+  const ws = { send: d => frame(typeof d === 'string' ? 1 : 2, Buffer.from(d)), close: () => socket.end(), onmessage () {}, onclose () {} }
+  let buf = Buffer.alloc(0), parts = []
+  socket.on('data', d => {
+    buf = Buffer.concat([buf, d])
+    while (buf.length >= 6) {
+      let len = buf[1] & 127, off = 2
+      if (len === 126) { len = buf.readUInt16BE(2); off = 4 } else if (len === 127) return socket.destroy()
+      if (!(buf[1] & 128) || buf.length < off + 4 + len) return                  // clients must mask; wait for more
+      const mask = buf.subarray(off, off + 4), data = Buffer.from(buf.subarray(off + 4, off + 4 + len)), op = buf[0] & 15, fin = buf[0] & 128
+      for (let i = 0; i < data.length; i++) data[i] ^= mask[i & 3]
+      buf = buf.subarray(off + 4 + len)
+      if (op === 8) return socket.end()
+      if (op === 9) { frame(10, data); continue }
+      if (op === 1 || op === 2) parts = [data, op]; else if (op === 0) parts[0] = Buffer.concat([parts[0], data]); else continue
+      if (fin) ws.onmessage(parts[1] === 1 ? parts[0].toString() : new Uint8Array(parts[0]))
+    }
+  })
+  socket.on('close', () => ws.onclose()).on('error', () => socket.destroy())
+  return ws
+}

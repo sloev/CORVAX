@@ -40,6 +40,7 @@ export class Peer {
     p.seen = new Map()                       // message id -> time (replay protection)
     p.beacons = new Map()                    // address -> { beacon, t }
     p.conns = new Map()                      // address -> open direct connection { pc, app, ctl }
+    p.wsRelays = new Map()                   // anchor key -> WebSocket relay connection (last resort)
     p.sessions = new Map()                   // sid -> WebRTC negotiation state
     p.bridges = new Map()                    // sid -> sessions we relay for others
     p.channels = new Map()                   // sid -> relayed channels we are an end of
@@ -97,7 +98,7 @@ export class Peer {
     if (!r) return this.book.record(e.key, 'http', false)
     const ok = await hiOk(r, unz32(e.key), n)
     this.book.record(e.key, 'id', ok)
-    if (ok) { this.book.get(e.key).storage = !!r.st; this.book.record(e.key, 'http', true, Date.now() - t0) }
+    if (ok) { Object.assign(this.book.get(e.key), { storage: !!r.st, relay: !!r.rl }); this.book.record(e.key, 'http', true, Date.now() - t0) }
   }
   anchors () { return this.book.shared(isBrowser ? 'browser' : 'native') }
   addAnchors (text) { return this.book.add(text).length }
@@ -265,6 +266,7 @@ export class Peer {
     this.abort.abort()
     clearTimeout(this.republish)
     for (const c of this.conns.values()) try { c.pc.close() } catch {}
+    for (const c of this.wsRelays.values()) try { c.ws.close() } catch {}
     for (const s of this.sessions.values()) try { s.pc?.close() } catch {}
     this.conns.clear(); this.sessions.clear()
   }

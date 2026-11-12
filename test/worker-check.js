@@ -33,5 +33,19 @@ try {
   await tb.unpublish()
   await until(() => seen.includes('expired'))
   step('watch: recent → expired')
+  A.blockDirect.add(B.address); B.blockDirect.add(A.address)              // no peer path: the anchor's WebSocket is the last resort
+  const incoming2 = new Promise(resolve => B.accept(resolve))
+  const r = await A.connect(B.address, { timeout: 4000 })
+  const bch = (await incoming2).channel
+  bch.onmessage = e => bch.send('pong:' + e.data)
+  const back = new Promise(resolve => { r.channel.onmessage = e => resolve(e.data) })
+  r.channel.send('relayed')
+  if (r.kind !== 'peer' || await back !== 'pong:relayed') throw new Error('websocket relay failed')
+  step(`relayed through the anchor's WebSocket (${r.via.slice(0, 8)}…)`)
+  const extra = [0, 1, 2].map(() => new WebSocket(origin.replace(/^http/, 'ws') + '/relay'))
+  const results = await Promise.all(extra.map(ws => new Promise(resolve => { ws.onopen = () => resolve('open'); ws.onerror = () => resolve('refused') })))
+  extra.forEach(ws => ws.close())
+  if (!results.includes('refused')) throw new Error('per-IP socket limit not enforced')
+  step(`per-IP relay socket limit: ${results.join(', ')}`)
   console.log('worker anchor OK')
 } catch (e) { console.error('FAILED:', e.message); process.exitCode = 1 } finally { await A.close(); await B.close(); setTimeout(() => process.exit(), 100) }
