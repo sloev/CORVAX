@@ -1,194 +1,128 @@
-# Rendezvous: implementation plan (single pass)
+# Rendezvous: the plan (final scope)
 
-> **Find anyone by key. Connect directly. No servers you have to trust, no conversation relays, no dependencies.**
+> **Peers find each other by key and exchange whatever they need to connect. That's all.**
 
-This document replaces the earlier plans: v1 ("signal over anything") and v2 ("peers only"), plus the BrowserMesh concept note. It describes **one codebase**, **one protocol** and **one first milestone**, written precisely enough to build in a single pass. Everything not needed for that milestone is in §12 *Later*.
+## 1. Scope
 
----
+Rendezvous does exactly three things:
 
-## 1. What we build
+1. **Identity:** a key pair whose public key is a permanent address.
+2. **Discovery:** publish a signed record under that address; anyone can resolve it.
+3. **Signalling:** deliver a small encrypted message to an address (an ICE candidate, an `IP:port`, an offer, anything up to 1 KB).
 
-```
- BROWSER A ──(WebSocket: KRPC)──► ANCHOR ◄──(UDP: KRPC)──► ANCHOR / Mainline DHT nodes
-     │                              ▲
-     │ zero-SDP WebRTC              │ (WebSocket: KRPC)
-     ▼                              │
- BROWSER B ─────────────────────────┘
+Then it gets out of the way. **How peers connect afterwards (WebRTC, QUIC, TCP, carrier pigeon) is up to them.**
 
- BROWSER A ◄══════ authenticated, direct DataChannel ══════► BROWSER B
-```
+### Non-goals (permanently, not "later")
+- Making or managing connections (WebRTC setup, NAT traversal strategy, relays, TURN)
+- Carrying application data (messages are size- and rate-limited, for signalling only)
+- Gossip, peer exchange, social introductions, topics/rooms
+- Reputation, utility scores, incentives
+- Extra carriers (mDNS, BLE, QR, audio, DNS servers, ...)
+- Ports to other languages (the spec is small enough that others can write them)
 
-**Milestone (definition of done):** two browsers on different networks, knowing only each other's address, find each other through the DHT and open a **direct, authenticated** DataChannel. No conversation bytes pass through any anchor. If no direct path exists, the connection **fails loudly**; it is never silently relayed.
-
----
-
-## 2. Decisions (with the BrowserMesh note reconciled)
-
-| Topic | BrowserMesh note | **Decision** | Why |
-|---|---|---|---|
-| Foundation | js-libp2p | **Zero dependencies.** Small, reimplemented pieces of standard protocols | Less code, nothing to keep in sync with upstream, one file tree that runs everywhere. libp2p is ~100k lines. |
-| Language | TypeScript | **Plain ESM JavaScript** + JSDoc types | Runs unmodified in browsers, Node 22+, Bun, Deno, Workers. No build step. |
-| Identity | `peer_id = SHA256(pk)` | **Address = Ed25519 public key**, z-base32 (52 chars) | Anyone holding the address can verify *and* encrypt to it. Same format as pkarr and iroh. |
-| DHT | custom Kademlia, 256-bit, K=20 | **The Mainline DHT protocol itself** (BEP 5 + BEP 44): 160-bit IDs, `target = SHA1(pk)`, K=8 | We can join a live network of ~10M nodes instead of bootstrapping a new one. Our own anchors form the same DHT among themselves. |
-| Wire encoding | deterministic CBOR | **Bencode KRPC everywhere** (UDP, WebSocket, DataChannel) | One protocol, already deterministic and compatible with Mainline. JSON is dropped. |
-| Records | JSON presence, 4 KB, TTL 120 s | **pkarr signed packet** (≤ 1000 B) holding the **Beacon** | Mainline limit. It *is* DNS, and pkarr relays can read it. |
-| Identity vs presence | separate | **Beacon** = where to reach me (refreshed every 30 min, expires after 2 h). **Presence** = an open inbox on an anchor (instant, gone on disconnect). | Writing to the DHT every 45 s would be abuse. Presence is cheap where it lives. |
-| Signalling | signed SDP + ICE via rendezvous | **Letters**: end-to-end encrypted, ≤ 1 KB, carrying `{fp, sid}` and candidates only. **Zero SDP** (both sides derive it) | Tested in Chromium. The anchor sees only ciphertext. |
-| Relays | never, TURN disabled | **`directOnly: true` by default**: no TURN, the selected candidate pair is checked with `getStats()` and the connection is dropped if it is relayed | Matches the note's core principle. Peer relays are a later, opt-in profile. |
-| Identity verification | sign session info | **Implicit + explicit:** Letters are authenticated by `K_ab`, so the DTLS fingerprint inside is bound to the identity. Then a challenge in the channel: each side signs `H(both fingerprints ‖ sid)` | A forged fingerprint fails the AEAD check. The challenge proves who is live on the other end. |
-| Gossip, introductions, utility scores | v1 features | **§12 Later** | Not needed for the milestone. |
+### Finished when
+- [ ] All tests in §7 pass
+- [ ] A Beacon published by our code can be read back from the public pkarr relay (real Mainline compatibility)
+- [ ] Two browsers on different networks exchange messages knowing only each other's address
+- [ ] README + spec are written. After that the project only receives bug fixes.
 
 ---
 
-## 3. One protocol: KRPC with two extensions
+## 2. Design (each decision made once)
 
-Every node (anchor, native, browser) speaks **Mainline KRPC** (bencoded `{t, y, q, a}` / `{t, y, r}` / `{t, y, e}`). The transport doesn't matter:
+| | Decision |
+|---|---|
+| **Code** | One zero-dependency ESM JavaScript codebase. Runs in browsers, Node 22+, Bun, Deno. No build step. |
+| **Crypto** | WebCrypto only: Ed25519, X25519, HKDF-SHA256, AES-GCM, SHA-1 |
+| **Address** | Ed25519 public key, z-base32, 52 chars (same as pkarr and iroh). Never expires. |
+| **Protocol** | BitTorrent Mainline KRPC (BEP 5 + BEP 44) on every transport, plus 2 extra queries |
+| **Record** | pkarr signed packet (≤ 1000 B) = BEP 44 mutable item at `SHA1(pk)` |
+| **Network** | Anchors are ordinary DHT nodes. They can join the live Mainline DHT (`--mainline`) or form their own network. Browsers reach them over WebSocket. |
 
-| Transport | Used between | Framing |
-|---|---|---|
-| UDP | anchor ↔ anchor, anchor ↔ Mainline | one datagram = one message |
-| WebSocket (binary) | browser/CLI ↔ anchor | one frame = one message |
-| DataChannel | browser ↔ browser (§12 Later) | one message = one message |
+---
 
-**Queries:**
+## 3. Protocol
 
-| `q` | Standard | Purpose |
+All messages are bencoded KRPC. Transports: **UDP** (anchor ↔ anchor / Mainline) and **WebSocket** (client ↔ anchor), with one message per datagram or frame. Clients set `ro: 1` (BEP 43).
+
+| Query | From | Meaning |
 |---|---|---|
 | `ping`, `find_node` | BEP 5 | routing |
-| `get`, `put` | BEP 44 | Beacon lookup and store (signature, seq and token checked) |
-| `rv_listen` | **ours** | `{k, ts, sig}`: open my inbox on this anchor (sig = Ed25519 over `"rv-listen:" ‖ ts`, ±5 min) |
-| `rv_send` | **ours** | `{to, letter}` → `r: {delivered: 0/1}`. Delivered to open inboxes, otherwise queued for 2 min (≤ 64 per inbox) |
-| (push) `rv_letter` | **ours** | anchor → client: `{letter}` (a query that gets no reply) |
+| `get`, `put` | BEP 44 | resolve / publish a Beacon |
+| `rv_listen {k, ts, sig}` | ours | "deliver my messages to this connection". `sig` = Ed25519(`"rv-listen:" ‖ ts`), ±5 min |
+| `rv_send {to, msg}` | ours | → `{delivered: 0/1}`. Delivered to listening connections, otherwise held for 2 min (≤ 64 per address) |
+| `rv_msg {msg}` | ours, anchor → client | a delivered message (no reply) |
 
-Clients connected over WebSocket set `ro: 1` (BEP 43), so they are never added to routing tables. **The anchor is just a DHT node with a WebSocket door**, and the browser runs the same `DHT` class, which saves a whole client protocol.
+### Formats
+```
+Address  z32(ed25519_pk)                                                        52 chars
+Beacon   pkarr: sig 64 | seq 8 (BE µs) | DNS packet, TXT "_rv" = "k=v"          ≤ 1000 B
+         c=<anchor url>  (where to send me messages; 1..n)   + any app-defined k=v
+Message  from_pk 32 | iv 12 | AES-GCM_K( ts 8 | bencode(body) ) | tag 16        ≤ 1024 B
+K        HKDF-SHA256( X25519(ed→x(sk_self), ed→x(pk_peer)), salt = sorted(pk_a ‖ pk_b), "rv/msg" )
+```
+Receivers reject messages with `|now − ts| > 10 min` or a repeated IV.
 
 ---
 
-## 4. Data formats (all sizes in bytes)
+## 4. Files (~900 lines total)
 
-```
-Address      z32(ed25519_pk)                                         52 chars
-DHT target   SHA1(pk)                                                20
-Beacon       pkarr: sig 64 | seq 8 (BE µs) | DNS packet (TXT "_rv" "k=v")   ≤ 1000
-             fields: c=<anchor ws url> (1..n), x=<expiry unix s>, n=<name>
-Letter       from_pk 32 | iv 12 | AES-GCM_{K_ab}( ts 8 | bencode(body) ) | tag 16   ≤ 1024
-K_ab         HKDF-SHA256( X25519(edToX(sk_a), edToX(pk_b)), salt = sort(pk_a, pk_b) )
-ICE creds    HKDF(K_ab, "rv/ice/<sid>/<caller|callee>") → ufrag = hex 4 B, pwd = hex 16 B
-```
+| File | Contents | State |
+|---|---|---|
+| `src/bytes.js` | hex, base64url, z-base32, u64, concat | ✅ draft |
+| `src/crypto.js` | WebCrypto wrappers, Ed25519→X25519 | ✅ draft |
+| `src/bencode.js` | encode/decode (hardened) | ✅ draft |
+| `src/record.js` | Beacon + BEP 44 signable + tiny DNS TXT codec | ✅ draft |
+| `src/dht.js` | sans-IO KRPC node + `rv_*` hooks | ✏️ add hooks |
+| `src/anchor.js` | UDP (DHT + STUN responder) · HTTP (pkarr-relay GET/PUT, serves `/rv/*.js`) · WebSocket server | ✏️ KRPC over WS |
+| `src/peer.js` | `create · publish · resolve · send · on` | ✏️ KRPC over WS |
+| `src/index.js` | exports | ✅ |
+| `bin/rv.js` | `rv anchor · id · resolve · send · listen` | ✅ draft |
+| `example/webrtc.html` | **Not part of the library.** Shows ~60 lines of zero-SDP WebRTC built on `send`/`on` | ✏️ move from `src/webrtc.js` + `demo.html` |
 
-Letter bodies: `{t:'rtc', sid, fp}` · `{t:'rtc-ok', sid, fp}` · `{t:'rtc-c', sid, c}` · `{t:'bye', sid}`. Replay protection: `|now − ts| < 10 min` and an IV dedup set.
-
----
-
-## 5. DirectConnect (state machine)
-
-```
-DISCOVERING  resolve(address) → Beacon (newest valid seq across ≥ 2 anchors)
-INTRODUCING  A → B  Letter {t:'rtc', sid, fp_A}          via B's anchors (c=…)
-NEGOTIATING  B builds A's offer from the template + derived creds, answers → Letter {t:'rtc-ok', fp_B}
-             A builds B's answer from the template + derived creds
-ICE_CHECKING both trickle {t:'rtc-c'}; iceServers = STUN on the anchors' UDP port (no TURN)
-VERIFYING    in the channel: each side sends sign(sk, SHA256("rv-auth" ‖ sid ‖ fp_A ‖ fp_B)), the other verifies
-             getStats(): the selected pair has no 'relay' candidate → otherwise FAILED
-CONNECTED    the channel is handed to the app; getStats re-checked every 10 s
-FAILED       explicit error: 'no-beacon' | 'unreachable' | 'ice-failed' | 'relayed' | 'auth-failed' | 'timeout'
-```
+The STUN responder stays (≈15 lines). It is a reachability primitive ("what is my public `IP:port`?"), which is part of a peer getting its own address.
 
 ---
 
-## 6. Files (≈ 1,200 lines in total)
-
-| File | Lines | Contents | State |
-|---|---|---|---|
-| `src/bytes.js` | 45 | concat, hex, base64url, z-base32, u64 | ✅ written |
-| `src/crypto.js` | 55 | WebCrypto Ed25519/X25519, ed→x conversion, HKDF, AES-GCM, SHA-1 | ✅ written |
-| `src/bencode.js` | 45 | encode/decode, hardened against truncated input and `__proto__` | ✅ written |
-| `src/record.js` | 60 | Beacon make/verify/pack/unpack, BEP 44 signable, mini DNS TXT codec | ✅ written |
-| `src/dht.js` | 170 | sans-IO KRPC node: routing, iterative lookup, get/put, token, storage, **+ rv_listen/rv_send hooks** | ✏️ add hooks |
-| `src/transport.js` | 60 | `udp(socket)`, `websocket(url)` (client, reconnecting), `wsServer` frames → common `send/receive` | ✏️ extract from anchor/peer |
-| `src/anchor.js` | 130 | UDP (DHT + STUN), HTTP (pkarr-relay GET/PUT, static files, demo), WS door, inboxes/mailboxes | ✏️ switch to KRPC-over-WS |
-| `src/peer.js` | 110 | identity, publish (+ 30 min refresh), resolve, send/open Letters, inbox | ✏️ switch to KRPC-over-WS |
-| `src/direct.js` | 130 | DirectConnect: zero-SDP, trickle, auth challenge, getStats direct-only check, errors | ✏️ rename + add verify |
-| `src/index.js` | 10 | public API | ✅ |
-| `src/demo.html` | 60 | address + QR-free copy · connect · chat | ✅ |
-| `bin/rv.js` | 50 | `rv anchor · id · resolve · send · listen` | ✅ |
-| `test/*.test.js` | 300 | see §8 | ⬜ |
-
-The browser loads the library straight from any anchor (`/rv/index.js`), so **no npm, no bundler**.
-
----
-
-## 7. Public API
+## 5. API (the whole thing)
 
 ```js
-import { Peer } from 'rendezvous'                       // or from 'https://<anchor>/rv/index.js'
+import { Peer } from 'rendezvous'          // or https://<anchor>/rv/index.js
 
-const me = await Peer.create({ seed, anchors: ['wss://a1.example', 'wss://a2.example'] })
-me.address                                              // 52-char key: give it to anyone, it never expires
-await me.publish({ n: 'Johannes' })                     // Beacon → DHT, refreshed automatically
-
-me.listen(({ from, channel }) => channel.onmessage = e => …)   // incoming direct connections
-const { channel } = await me.connect('8pz…')            // throws DirectError(code) if not direct
-
-await me.resolve('8pz…')                                // { c: [...], n: [...], seq }
+const me = await Peer.create({ seed, anchors: ['wss://anchor.example'] })
+me.address                                 // permanent, shareable
+await me.publish({ n: 'name' })            // signed Beacon → DHT (refreshed every 30 min)
+await me.resolve(address)                  // → { c: [...], n: [...], seq } | null
+await me.send(address, body)               // encrypted, ≤ 1 KB → true (delivered) / false (queued)
+me.on(({ from, body }) => {})              // incoming messages
+me.close()
 ```
 
-Native/CLI peers (no `RTCPeerConnection`) get everything except `connect/listen`. They can still publish, resolve and exchange Letters (signalling only, ≤ 1 KB, rate-limited by anchors).
+---
+
+## 6. Limits enforced in code
+- Beacon: signature valid, seq monotonic, ≤ 1000 B, checked on store *and* on use
+- Message: AEAD authenticates the sender, ts window, IV dedup, ≤ 1024 B
+- Anchor per IP: `put` 10/min, `rv_send` 60/min, `get` 120/min; inbox cap 64; frame cap 4 KB
+- DHT: tokens tied to the source IP, rotated every 10 min; routing table capped at 1000; responders added only after they answer
 
 ---
 
-## 8. Tests (all must pass in one `npm test`)
-
+## 7. Tests (`npm test`)
 | Test | Proves |
 |---|---|
-| `core` | z32 round trip · bencode round trip + fuzz (truncated input never hangs) · `edToX(pk)` equals the X25519 public key derived from the seed · Beacon sign/verify/tamper · Letter seal/open/tamper/replay |
-| `dht` | 20 in-process nodes on loopback UDP: `put` on node 1, `get` on node 20 returns the newest seq; a stale seq is rejected; a bad signature is rejected |
-| `anchor` | 3 anchors chained by bootstrap; peer A on anchor 1 publishes; peer B on anchor 3 resolves A and sends a Letter → A receives it · HTTP `GET /<addr>` returns pkarr bytes · STUN reply decodes to the sender's address |
-| `browser` (Playwright/Chromium) | two pages, two identities, one anchor: `connect()` → direct channel, auth ok, `getStats` pair is `host`/`srflx`, message echoes · forcing relay-only ICE → `DirectError('relayed' or 'ice-failed')` |
-| `runtimes` | the `anchor` test also passes under **Bun**; `core` passes under Deno if present |
-| `pkarr-live` (manual, needs network) | PUT our Beacon to `relay.pkarr.org`, GET it back, verify. **Proves wire compatibility with the real Mainline ecosystem.** |
+| `core` | z32 / bencode round trips, truncated bencode never hangs, `ed→x(pk)` equals the derived X25519 key, Beacon tamper detection, message tamper + replay rejection |
+| `dht` | 20 nodes on loopback: put on one, get from another, stale seq and bad signature rejected |
+| `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves A and sends → A receives; `GET /<addr>` returns pkarr bytes; STUN reply is correct; rate limit triggers |
+| `browser` | Playwright, two Chromium pages: resolve + exchange messages through an anchor; `example/webrtc.html` connects |
+| `bun` | the `anchor` test passes under Bun |
+| `pkarr-live` (manual) | our Beacon round-trips through `relay.pkarr.org` |
 
 ---
 
-## 9. Build order (one pass)
-
-1. **dht.js hooks:** an `onQuery(q, a, from)` extension point; `ro` support; tests `core` + `dht` green.
-2. **transport.js:** move the WS frame code out of anchor; client WS that reconnects and speaks bencode.
-3. **anchor.js:** WS door = `dht.receive(bytes, wsFrom)`, implement `rv_listen`/`rv_send`; delete the JSON ops. Test `anchor` green.
-4. **peer.js:** a `DHT` instance with `ro`, transport = WS links; `publish/resolve/send/listen` via KRPC; 30-min refresh timer.
-5. **direct.js:** current `webrtc.js` + auth challenge + `getStats` check + `DirectError`. Test `browser` green.
-6. **CLI + demo:** wire up; manual run of `pkarr-live`.
-7. **Docs:** README quickstart (run an anchor, open the demo on two devices, or use `cloudflared tunnel --url http://localhost:4799` for instant `wss://`).
-
----
-
-## 10. Security checklist (all enforced in code)
-
-- Every Beacon: signature + seq monotonic + ≤ 1000 B, before storing *and* before using.
-- Every Letter: AEAD under `K_ab` (so the sender is authenticated) + ts window + IV dedup + ≤ 1 KB.
-- Anchors: per-IP token bucket (`put` 10/min, `rv_send` 60/min, `get` 120/min), inbox cap 64, WS frame cap 64 KB, `rv_listen` requires a key signature.
-- DHT: tokens tied to the source IP (rotated every 10 min), a responder is added only after it answers, routing table capped at 1000.
-- Direct: no TURN ever configured; selected pair verified; channel identity proven by signature.
-- Disclosure in README: a direct WebRTC connection reveals your IP to the peer you connect to (by design).
-
----
-
-## 11. Deploying (cost: $0)
-
-- **Anchor:** `npx rendezvous anchor` (or `node bin/rv.js anchor`) on any box with an open UDP+TCP port, e.g. a free-tier VM, a Raspberry Pi with a port forward, or a laptop.
-- **TLS for browsers on HTTPS sites:** put the anchor behind Cloudflare (`cloudflared tunnel`, free) → `wss://anchor.yourdomain`.
-- **Join the global DHT:** `rv anchor --mainline`. Beacons then live on ~10M BitTorrent nodes and resolve via any pkarr relay as well.
-
----
-
-## 12. Later (in order of value, none needed for the milestone)
-
-1. **Browser DHT over DataChannels.** Browsers keep connections open and run KRPC over them (same `DHT` class). Tabs start as `ro` and are promoted after N minutes of uptime.
-2. **Peer exchange + gossip** (bounded fan-out 3, TTL 5, dedup) for discovering *unknown* peers by topic: `target = SHA1("topic:" ‖ name)`.
-3. **Social introductions:** signed "A introduces B to C" Letters; friends-of-friends lookup.
-4. **WebRTC-direct anchors:** browsers dial anchors over UDP with no WebSocket and no TLS (needs a ~1,500-line DTLS + SCTP reimplementation).
-5. **Opt-in peer relay profile** (`directOnly: false`): deterministic relay selection `closest(H(K_ab))`, friends first.
-6. **Utility receipts and tiers:** signed "served you N lookups" receipts; quotas only, never gating incoming connections.
-7. **More carriers:** LAN mDNS/broadcast, QR, audio, NFC, DNS-over-HTTPS read path, BEP 44 mailbox Letters for native peers.
-8. **Ports:** Rust/Go/Python from the spec + test vectors (the protocol is just KRPC + 3 queries + 2 formats).
-9. **Merkle range-sync** of Beacon neighbourhoods; transparency log for key rotation.
+## 8. Build order
+1. `dht.js` hooks + `ro` → `core`, `dht` green
+2. `anchor.js` WebSocket door speaks KRPC, `rv_listen`/`rv_send`, rate limits → `anchor` green
+3. `peer.js` on KRPC-over-WS, publish refresh → `browser` (messages) green
+4. Move WebRTC into `example/`, CLI, `pkarr-live`, Bun run
+5. README (quickstart, `cloudflared tunnel` for `wss://`, IP-exposure note) + `SPEC.md` (§3 as a standalone page). **Done.**
