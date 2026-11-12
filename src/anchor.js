@@ -5,57 +5,18 @@
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { encode, decode } from './bencode.js'
-import { verify, sha256, random, hiOk } from './crypto.js'
+import { verify, random, hiOk } from './crypto.js'
 import { verifyBeacon } from './record.js'
 import { hex, utf8, str, z32 } from './bytes.js'
 import { homepage } from './home.js'
+import { Inboxes } from './inbox.js'
+export { Inboxes }
 import { serve } from './store.js'
 
-const INBOX_TTL = 120e3, INBOX_MAX = 64, POLL_MAX = 25e3, BODY_MAX = 8192
+const BODY_MAX = 8192
 const COST = { put: 6, cx_check: 12, cx_tpub: 2, cx_send: 1, cx_tfind: 1, cx_listen: 0.5, cx_twatch: 0.5, get: 1, get_peers: 1 }
 const ids = (x, max) => Array.isArray(x) ? x.filter(b => b instanceof Uint8Array && b.length === 32).slice(0, max) : []
 const srcDir = new URL('./', import.meta.url), logoDir = new URL('../assets/logo/', import.meta.url)
-
-export class Inboxes {
-  constructor () { this.boxes = new Map() }
-  #box (k) {
-    const id = hex(k)
-    if (!this.boxes.has(id)) this.boxes.set(id, { seq: 0, msgs: [], waiter: null })
-    const box = this.boxes.get(id), now = Date.now()
-    box.msgs = box.msgs.filter(m => now - m.t < INBOX_TTL)
-    return box
-  }
-  async put (to, msg) {
-    const box = this.#box(to), h = hex(await sha256(msg))
-    if (!box.msgs.some(m => m.h === h)) {                              // retries are idempotent
-      box.msgs.push({ seq: ++box.seq, msg, h, t: Date.now() })
-      if (box.msgs.length > INBOX_MAX) box.msgs.shift()
-    }
-    box.waiter?.(); box.waiter = null
-  }
-  async listen (k, after, signal) {
-    const box = this.#box(k)
-    box.msgs = box.msgs.filter(m => m.seq > after)                      // acknowledged → deleted
-    if (!box.msgs.length && !signal?.aborted) {
-      box.waiter?.()                                                    // a newer poll ends the older one
-      await new Promise(resolve => {
-        const timer = setTimeout(done, POLL_MAX)
-        function done () { clearTimeout(timer); signal?.removeEventListener('abort', done); if (box.waiter === done) box.waiter = null; resolve() }
-        box.waiter = done
-        signal?.addEventListener('abort', done)
-      })
-    }
-    return box.msgs.map(m => ({ seq: m.seq, msg: m.msg }))
-  }
-  close () { for (const box of this.boxes.values()) box.waiter?.() }
-  sweep () {
-    const now = Date.now()
-    for (const [id, box] of this.boxes) {
-      box.msgs = box.msgs.filter(m => now - m.t < INBOX_TTL)
-      if (!box.msgs.length && !box.waiter) this.boxes.delete(id)
-    }
-  }
-}
 
 export function installHandlers (node) {
   const h = node.dht.handlers

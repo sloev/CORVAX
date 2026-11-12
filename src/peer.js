@@ -11,7 +11,7 @@ import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, equal, fail, sle
 export { CorvaxError }
 import * as rtc from './rtc.js'
 import * as relay from './relay.js'
-import baked from './anchors.js'
+import baked, { sources as fallback } from './anchors.js'
 import { Topics } from './topics.js'
 import { TopicStore, serve } from './store.js'
 
@@ -29,6 +29,7 @@ export class Peer {
     p.seed = hex(p.id.seed)
     p.book = o.book || new Book({ allowPrivate: o.allowPrivate })
     p.platform = { ...defaultPlatform(), ...o.platform }
+    p.stun = o.stun ?? ['stun:stun.cloudflare.com:3478']
     p.relay = o.relay ?? 'fallback'
     p.relayFor = o.relayFor ?? true
     p.limits = { ...(isBrowser ? { sessions: 2, kbps: 256 } : { sessions: 16, kbps: 2048 }), ...o.relayLimits }
@@ -66,8 +67,11 @@ export class Peer {
       ...(o.dohDomains || []).map(d => this.platform.dnsTxt(`_corvax-anchors.${d}`).then(t => this.book.add(t))),
       this.platform.discover?.().then(t => this.book.add(t || '', { lan: true }))
     ])
-    // probe in rounds until we have an inbox (a stale cache must not starve bootstrap)
-    for (let i = 0; i < 6 && !this.#chooseInboxes().length && this.book.due(1).some(e => !e.lastProbe); i++) await this.verify(16)
+    // probe in rounds until we have an inbox (a stale cache must not starve bootstrap); built-in sources last
+    for (const last of [false, true]) {
+      if (last && !this.#chooseInboxes().length) await Promise.allSettled(fallback.map(u => this.platform.fetchText(u).then(t => this.book.add(t))))
+      for (let i = 0; i < 6 && !this.#chooseInboxes().length && this.book.due(1).some(e => !e.lastProbe); i++) await this.verify(16)
+    }
     this.inboxes = this.#chooseInboxes()
     await this.refresh()
     this.refresher = setInterval(() => this.refresh().catch(() => {}), 10 * 60e3)
@@ -109,9 +113,10 @@ export class Peer {
     return this.book.best(2, isBrowser ? 'browser' : 'native', e => e.verified && this.urlOf(e))
       .map(entry => ({ entry, url: this.urlOf(entry) }))
   }
+  // STUN: anchors proven to answer UDP, plus public fallbacks (HTTPS-only anchors, like Workers, can't do STUN)
   iceServers () {
-    return this.book.best(2, 'native', e => e.verified)
-      .map(e => ({ urls: `stun:${e.host.includes(':') ? `[${e.host}]` : e.host}:${e.port}` }))
+    return [...this.book.best(2, 'native', e => e.verified && e.udp > 0)
+      .map(e => `stun:${e.host.includes(':') ? `[${e.host}]` : e.host}:${e.port}`), ...this.stun].map(urls => ({ urls }))
   }
 
   async rpc (url, q, a = {}, { timeout = 8000, retries = 2, signal: extra } = {}) {
@@ -153,7 +158,7 @@ export class Peer {
     const urls = [...new Set([...this.inboxes.map(ib => ib.url), ...this.book.best(3, 'native', e => e.verified).map(e => this.urlOf(e))].filter(Boolean))].slice(0, 3)
     let best = null
     await Promise.allSettled(urls.map(async u => {
-      const r = await this.rpc(u, 'get', { target })
+      const r = await this.rpc(u, 'get', { target, k: pub })       // k lets HTTPS-only anchors ask a pkarr relay
       if (!r.v || !(r.k instanceof Uint8Array) || !equal(r.k, pub)) return
       const rec = { pub, seq: r.seq, sig: r.sig, v: r.v }
       if ((!best || rec.seq > best.seq) && await verifyBeacon(rec)) best = rec

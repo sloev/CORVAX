@@ -1,0 +1,22 @@
+# CORVAX anchor on Cloudflare Workers:  npx wrangler deploy   →  https://corvax.<account>.workers.dev
+name = "corvax"
+main = "worker/index.js"
+compatibility_date = "2025-09-01"
+
+[assets]                      # the library, served at /cx/*.js
+directory = "src"
+binding = "ASSETS"
+run_worker_first = true
+
+[[durable_objects.bindings]]  # one object holds the key, inboxes, topic records, Beacons and anchor book
+name = "ANCHOR"
+class_name = "Anchor"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Anchor"]
+
+[[rules]]
+type = "Data"
+globs = ["**/*.ico"]
+fallthrough = true

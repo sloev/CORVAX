@@ -12,6 +12,8 @@ An **anchor** is a peer with an independently reachable public endpoint (UDP and
 
 Anchors have no authority. Everything they hold is signed by its owner and verified by its reader.
 
+An **HTTPS-only anchor** (e.g. the Cloudflare Worker in `worker/`) serves everything in §3–§6 that runs over HTTP: inboxes, topic storage, `cx_anchors`, and Beacons, which it mirrors to Mainline through a pkarr relay. It has no UDP, so no DHT routing, STUN, `cx_check` or relaying. Its line uses port 443 and `web=`.
+
 ## 2. Identity and records
 
 ```
@@ -47,7 +49,7 @@ Every transport carries bencoded KRPC (`{t, y:"q", q, a}` → `{t, y:"r", r}` | 
 | Transport | Framing | Notes |
 |---|---|---|
 | UDP | one datagram | a datagram with first byte < 2 and the STUN cookie at bytes 4–7 is STUN (binding replies) |
-| HTTP `POST /krpc` | one body, one reply | `Content-Type: text/plain` (no CORS preflight), ≤ 8 KB. A repeated `t` from the same IP within 60 s gets the cached reply. `get`, `put` and `get_peers` are recursive (the peer does the DHT work; no token) |
+| HTTP `POST /krpc` | one body, one reply | `Content-Type: text/plain` (no CORS preflight), ≤ 8 KB. A repeated `t` from the same IP within 60 s gets the cached reply. `get`, `put` and `get_peers` are recursive (the peer does the DHT work; no token); `get` also carries `k` (the public key) so HTTPS-only anchors can ask a pkarr relay |
 | WebRTC | text frame `"K" ‖ b64(bencode)` | on a connection's `cx` channel or a topic link: `cx_hi`, `cx_tpub`, `cx_tfind` |
 
 Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabled · 206 bad signature · 302 stale.
