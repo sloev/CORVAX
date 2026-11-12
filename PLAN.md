@@ -94,7 +94,7 @@ TURN      user = "<expiry>:<z32>", pass = base64(HMAC-SHA1(anchor_secret, user))
 | `rv_listen {k, ts, sig}` | ours | **long poll**: waits ≤ 25 s → `{msgs: [...]}`. `sig` = Ed25519(`"rv-listen:" ‖ ts`), ±5 min |
 | `rv_turn {k, ts, sig}` | ours | → `{user, pass, ttl, urls}` for this anchor's TURN |
 
-**Anchor HTTP endpoints:** `GET /` (homepage, below) · `POST /krpc` · `GET /anchors.txt` · `GET /rv/*.js` (the library) · `GET /demo` (two-tab chat demo). CORS `*` on everything.
+**Anchor HTTP endpoints:** `GET /` (homepage, below; it is also the anchor list) · `POST /krpc` · `GET /rv/*.js` (the library) · `GET /demo` (two-tab chat demo). CORS `*` on everything.
 
 ### The homepage (`GET /`)
 Every node reachable over HTTP serves a thin page, so anyone who stumbles on an anchor's address learns what it is and how to join.
@@ -104,7 +104,7 @@ Every node reachable over HTTP serves a thin page, so anyone who stumbles on an 
   3. **How to use it:**
      - browser: `import { Peer } from '<this origin>/rv/index.js'`
      - native: `npx rendezvous node`
-     - list: `curl <this origin>/anchors.txt`
+     - list: `curl -s <this origin> | grep -o 'rv-anchor:[^ <]*'`
      - plus links to `/demo` and the repo
   4. **Known anchors:** the book's shared view (best 32 + 8 random), one anchor line per row with its score, inside a `<pre>`
 - **Rules:**
@@ -113,7 +113,7 @@ Every node reachable over HTTP serves a thin page, so anyone who stumbles on an 
   - dark and light mode via `prefers-color-scheme`
   - readable on a phone
   - all dynamic values HTML-escaped
-- **It doubles as an anchor list:** the anchor lines appear verbatim, so the page itself is a valid `sources` URL and a greppable channel (§6).
+- **It is the anchor list:** the anchor lines appear verbatim, so the page itself is a valid `sources` URL and a greppable channel (§6). There is no separate `/anchors.txt` endpoint; machines use `rv_anchors`.
 
 ---
 
@@ -133,9 +133,9 @@ Every node reachable over HTTP serves a thin page, so anyone who stumbles on an 
 | Channel | Browser | Native |
 |---|---|---|
 | Local cache (IndexedDB / `~/.config/rv/anchors.txt`) | ✅ | ✅ |
-| Baked-in `anchors.txt` (package / repo) | ✅ | ✅ |
+| Baked-in `anchors.txt` file (shipped in the package / repo) | ✅ | ✅ |
 | Any text: invite link, paste, file, any URL (`sources: [...]`), including any anchor's homepage | ✅ (HTTPS + CORS) | ✅ |
-| `GET /anchors.txt` / `rv_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
+| `GET /` (homepage) / `rv_anchors` on any known anchor | ✅ (`web=` anchors) | ✅ |
 | DNS TXT `_rv-anchors.<domain>` (`dohDomains: [...]`) | ✅ via public DoH JSON | ✅ via system resolver |
 | Mainline `get_peers` on the anchor infohash | ❌ | ✅ |
 | LAN: UDP broadcast/multicast `RV?` on port 4799, mDNS `_rv._udp.local` TXT | ❌ | ✅ (every native node answers) |
@@ -227,7 +227,7 @@ CLI: `rv node` (peer that promotes itself), `rv anchor` (forced anchor), `rv anc
 | `anchor` | 3 chained anchors: A publishes on #1, B on #3 resolves and sends, A's long poll receives; `rv_check` promotes reachable nodes only; token bucket triggers |
 | `turn` | allocate → permission → data via the relay; bad credentials and quotas enforced |
 | `lan` | broadcast and mDNS discovery between two nodes on loopback/multicast |
-| `browser` | Playwright **Chromium, Firefox, WebKit**: two pages bootstrap from `/anchors.txt`, connect direct, then forced relay (`iceTransportPolicy: 'relay'` → `kind: 'turn'`) |
+| `browser` | Playwright **Chromium, Firefox, WebKit**: two pages bootstrap from an anchor's homepage (`sources: [origin]`), connect direct, then forced relay (`iceTransportPolicy: 'relay'` → `kind: 'turn'`) |
 | `live` (manual) | Beacon via `relay.pkarr.org`; TXT via public DoH; `announce_peer` on real Mainline |
 
 ---
