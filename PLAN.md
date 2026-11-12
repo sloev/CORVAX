@@ -13,7 +13,7 @@ Rendezvous makes the **message format** the fixed part and lets the **transport*
 
 ```
             ┌──────────────── one identity  (Ed25519 key  → address that lasts for years)
-            │   ┌──────────── one record    (signed "Beacon", ≤ 1000 bytes, usually ~300)
+            │   ┌──────────── one record    (signed "Beacon", ≤ 1000 bytes, usually ~110–160)
             │   │   ┌──────── one envelope  (encrypted "Letter", ≤ 1000 bytes)
             ▼   ▼   ▼
    ╔═══════════════════════════════════════════════════════════════════════╗
