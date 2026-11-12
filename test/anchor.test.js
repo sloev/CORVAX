@@ -95,7 +95,7 @@ test('homepage: tiny shell + app.js for browsers, plain anchor list for everythi
     assert.ok(lines.every(l => parseLine(l)), 'plain text is nothing but anchor lines')
     assert.equal(lines.filter(l => l.startsWith(`corvax-anchor:${a2.key}@`)).length, 1, 'own line exactly once')
   }
-  const p = await Peer.create({ anchors: [], allowPrivate: true, RTCPeerConnection: null })
+  const p = await Peer.create({ anchors: [], fallback: [], allowPrivate: true, RTCPeerConnection: null })
   t.after(() => p.close())
   assert.ok(p.addAnchors(html) >= 2, 'the HTML shell is also a valid anchor source')
   const ico = await fetch(base + '/favicon.ico')

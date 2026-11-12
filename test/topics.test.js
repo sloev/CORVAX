@@ -109,7 +109,7 @@ test('one long poll per storage peer for many topics; lost cursor → snapshot r
 
 test('placement prefers established storage peers; a fresh key closer to the topic cannot take a closest slot', async () => {
   const { z32: enc } = await import('../src/bytes.js')
-  const p = await Peer.create({ anchors: [], allowPrivate: true, RTCPeerConnection: null })
+  const p = await Peer.create({ anchors: [], fallback: [], allowPrivate: true, RTCPeerConnection: null })
   peers.push(p)
   const id = await topicId('eclipse')
   const near = k => { const b = new Uint8Array(id); b[31] ^= k; return enc(b) }       // keys XOR-close to the topic id
@@ -130,7 +130,7 @@ test('placement prefers established storage peers; a fresh key closer to the top
   for (let i = 0; i < 40; i++) randoms.add(p.topics.pick(id, 4, 1)[4].key)
   assert.ok(randoms.size > 1, 'the fifth copy goes to a random other peer')
   // a young network: fewer than 4 established → the closest of the rest fill in
-  const q = await Peer.create({ anchors: [], allowPrivate: true, RTCPeerConnection: null })
+  const q = await Peer.create({ anchors: [], fallback: [], allowPrivate: true, RTCPeerConnection: null })
   peers.push(q)
   for (const k of sybils) { q.addAnchors(`corvax-anchor:${k}@10.1.1.1:4799`); q.book.record(k, 'id', true); q.book.record(k, 'http', true); q.book.get(k).storage = true }
   assert.equal(q.topics.pick(id, 4, 1).length, 3)

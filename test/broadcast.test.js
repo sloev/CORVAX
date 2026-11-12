@@ -9,7 +9,7 @@ import { anchors, until } from './helpers.js'
 
 // ---- unit: one real Peer, fake neighbour links ----------------------------------------------------
 async function harness () {
-  const me = await Peer.create({ anchors: [], RTCPeerConnection: null })
+  const me = await Peer.create({ anchors: [], fallback: [], RTCPeerConnection: null })
   const t = await me.topic('chess')
   const got = []
   t.subscribe({ message: m => got.push(m) })

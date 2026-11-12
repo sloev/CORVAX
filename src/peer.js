@@ -70,7 +70,7 @@ export class Peer {
     ])
     // probe in rounds until we have an inbox (a stale cache must not starve bootstrap); built-in sources last
     for (const last of [false, true]) {
-      if (last && !this.#chooseInboxes().length) await Promise.allSettled(fallback.map(u => this.platform.fetchText(u).then(t => this.book.add(t))))
+      if (last && !this.#chooseInboxes().length) await Promise.allSettled((o.fallback ?? fallback).map(u => this.platform.fetchText(u).then(t => this.book.add(t))))
       for (let i = 0; i < 6 && !this.#chooseInboxes().length && this.book.due(1).some(e => !e.lastProbe); i++) await this.verify(16)
     }
     this.inboxes = this.#chooseInboxes()
