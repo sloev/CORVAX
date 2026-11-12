@@ -135,3 +135,19 @@ test('placement prefers established storage peers; a fresh key closer to the top
   for (const k of sybils) { q.addAnchors(`corvax-anchor:${k}@10.1.1.1:4799`); q.book.record(k, 'id', true); q.book.record(k, 'http', true); q.book.get(k).storage = true }
   assert.equal(q.topics.pick(id, 4, 1).length, 3)
 })
+
+test('presence counter: short lease, instant pre-signed leave, no links', async () => {
+  const a = await peer({ listen: false, storage: false, topicLimits: {} }), w = await peer({ listen: false, topicLimits: {} })
+  const here = new Set()
+  ;(await w.topic('visitors')).subscribe({ presence: e => e.presence === 'recent' ? here.add(e.address) : here.delete(e.address) })
+  const t = await a.topic('visitors')
+  await t.publish({ beacon: false, lease: 20e3 })
+  assert.ok(a.topics.renewAt - Date.now() <= 12e3, 'renewed at half the short lease')
+  assert.ok(!a.beaconSeq, 'no Beacon published')
+  await until(() => here.has(a.address), 10000)
+  const t0 = Date.now()
+  t.unpublish()                                                         // not awaited, like a closing page
+  await until(() => !here.has(a.address), 10000)
+  assert.ok(Date.now() - t0 < 5000, 'leave seen within the watch coalescing window')
+  assert.equal(w.topics.links.size + a.topics.links.size, 0, 'presence-only: no WebRTC links')
+})

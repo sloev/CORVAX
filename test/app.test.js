@@ -20,7 +20,16 @@ test(`homepage app (${name})`, { skip: !playwright && 'playwright not installed'
     return { page, errors }
   }
   const [A, B] = [await open(), await open()]
-  await B.page.getByText('2 live visitors').waitFor({ timeout: 20000 })   // the page counts itself over CORVAX topic presence
+  // the page counts its viewers with CORVAX topic presence: a reload is the same visitor, closing leaves at once
+  await B.page.getByText('2 people here now').waitFor({ timeout: 20000 })
+  const C = await open()
+  await A.page.getByText('3 people here now').waitFor({ timeout: 20000 })
+  await C.page.reload()
+  await C.page.getByText('3 people here now').waitFor({ timeout: 20000 })
+  await new Promise(resolve => setTimeout(resolve, 3000))
+  assert.ok(await A.page.getByText('3 people here now').isVisible(), 'a reload does not add a visitor')
+  await C.page.close({ runBeforeUnload: true })
+  await A.page.getByText('2 people here now').waitFor({ timeout: 10000 })
   const tab = (p, label) => p.getByRole('navigation').getByRole('button', { name: label }).click()
 
   // header: inlined logo; DOX first for new visitors, the last view remembered across reloads

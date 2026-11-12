@@ -41,6 +41,34 @@ await chess.search()                           // [{ address, presence: 'recent'
 await chess.broadcast({ move: 'e4' })          // ≤ 1 KB, best-effort, never stored
 ```
 
+### Example: a live visitor counter
+
+A whole page; open it in two tabs. No server or account.
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<p><b id="count">…</b> people here now</p>
+<script type="module">
+  import { Peer } from 'https://cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js'
+
+  // One key per tab, so a reload stays the same visitor. Presence only: no inbox, no storage, no relaying.
+  const seed = sessionStorage.getItem('corvax-seed')
+  const me = await Peer.create({ seed, listen: false, storage: false, relayFor: false })
+  sessionStorage.setItem('corvax-seed', me.seed)
+
+  // Everyone on this page joins the same topic and watches who else is there.
+  const room = await me.topic(location.host + location.pathname), others = new Set()
+  const show = () => document.getElementById('count').textContent = others.size + 1
+  room.subscribe({ presence: e => { e.presence === 'recent' ? others.add(e.address) : others.delete(e.address); show() } })
+
+  // A 2-minute lease, renewed automatically; withdrawn when the tab hides or closes.
+  const join = () => room.publish({ beacon: false, lease: 120e3 })
+  await join(); show()
+  document.addEventListener('visibilitychange', () => document.hidden ? room.unpublish() : join())
+</script>
+```
+
 Outside browsers, WebRTC comes from `werift` (an optional dependency); pass your own with `Peer.create({ RTCPeerConnection })`. STUN uses anchors that answer UDP plus `stun:stun.cloudflare.com:3478` (`Peer.create({ stun })`). When no given or cached anchor answers, peers fall back to `https://corvax.sloev.workers.dev/` (`Peer.create({ fallback })`).
 
 ## Run a node

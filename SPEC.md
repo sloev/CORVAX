@@ -99,8 +99,8 @@ id     = SHA-256("cx/topic:" ‖ normalize(name))     normalize: NFKC, trim, col
 ```
 record = bencode { t: id, k: ed_pub, seq, exp, sig }    sig = Ed25519("cx-topic" ‖ bencode{ t, k, seq, exp })
 ```
-- `seq` increases per (t, k); `exp ≤ now + 10 min`.
-- A tombstone has a higher `seq` and `exp ≤ now`.
+- `seq` increases per (t, k); `exp ≤ now + 10 min` (a publisher may choose a shorter lease, ≥ 10 s).
+- A tombstone has a higher `seq` and `exp ≤ now`. Publishers sign it together with each record, so withdrawing needs no async work: browsers send it on `pagehide` with `fetch(…, { keepalive: true })` to the storage peers that took the record.
 - Presence is `recent` while `exp > now` (skew-corrected), otherwise `expired`.
 
 **Storage** (any peer). `cx_tpub` statuses, checked in order:
@@ -124,7 +124,7 @@ record = bencode { t: id, k: ed_pub, seq, exp, sig }    sig = Ed25519("cx-topic"
 
 **Placement:**
 - **Publish:** 4 XOR-closest (`ed_pub ⊕ id`) *established* storage peers (score ≥ 75; fresh keys fill in only if fewer exist), plus 1 random other. Up to 8 are tried; also the publisher's own store and its topic neighbours.
-- **Renew:** every 5 min ± 20 %, batched per storage peer.
+- **Renew:** at half the shortest lease (default every 5 min) ± 20 %, batched per storage peer.
 - **Clock skew:** `skew` = median of (peer `now` − local midpoint) over 8 replies; one retry after `future`/`expired`.
 - **Search:** own store + neighbours + 6 closest established + 2 random. Readers verify every record.
 - **Watch:** one `cx_twatch` per storage peer covering all of a reader's topics that map to it (each topic's 4 closest). A peer is skipped for 5 min after 3 failures.
@@ -146,8 +146,8 @@ Each connection is standard WebRTC with negotiated DataChannels id 0 (payload) a
 4. Frames: `sid 9 ‖ ctr 8 ‖ AES-256-GCM(K_dir, iv 0⁴ ‖ ctr, type ‖ data)`, with `K_a2b`/`K_b2a` = HKDF(X25519(eph_a, eph_b), "cx/relay" ‖ sid ‖ "a2b"/"b2a"). Counters only increase. C only sees ciphertext.
 
 **Topic links:**
-- ≤ 4 per topic and ≤ 16 per peer, opened to `recent` providers with `p: "topic"`.
-- A peer accepts only if subscribed and below both limits, otherwise it answers `busy`.
+- ≤ 4 per topic and ≤ 16 per peer, opened to `recent` providers with `p: "topic"`, only by peers that subscribe to broadcasts (presence-only readers open none).
+- A peer accepts only if subscribed to broadcasts and below both limits, otherwise it answers `busy`.
 - If both sides dial at once, the lower address wins.
 
 **Broadcast frame** (binary, on a topic link):

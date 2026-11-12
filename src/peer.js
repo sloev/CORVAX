@@ -53,7 +53,7 @@ export class Peer {
     p.store = o.store !== undefined ? o.store : o.storage === false ? null : new TopicStore()
     if (p.store && o.store === undefined) { p.sweeper = setInterval(() => p.store.sweep(), 30e3); p.sweeper.unref?.() }
     await p.bootstrap(o)
-    for (const ib of p.inboxes) p.#poll(ib)
+    if (o.listen !== false) for (const ib of p.inboxes) p.#poll(ib)   // listen: false = never receives messages
     return p
   }
 

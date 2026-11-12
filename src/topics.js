@@ -3,7 +3,8 @@
 //   search        → own store, neighbours, 6 + 2 storage peers; every record verified here (storage is untrusted)
 //   subscribe     → one cx_twatch long poll per storage peer, plus ≤ 4 neighbour links for broadcast
 import { topicId, normalize, makeRecord, readRecord, makeFrame, encodeFrame, checkFrame, LIMITS } from './topic.js'
-import { hex, z32, unz32, utf8, str, xor, compare, fail, sleep, unref, shuffle, bytesOf, toWire } from './bytes.js'
+import { hex, z32, unz32, utf8, str, xor, compare, fail, sleep, unref, shuffle, bytesOf, toWire, random } from './bytes.js'
+import { encode } from './bencode.js'
 
 const jitter = (ms, j) => ms * (1 - j + 2 * j * Math.random())
 
@@ -23,6 +24,12 @@ export class Topics {
     this.debounce = new Map()     // tid -> timer
     this.stats = { delivered: 0, forwarded: 0, dropped: {} }
     this.closed = false
+    // Browsers: leaving the page withdraws every lease at once (pre-signed, sent with keepalive); back from bfcache, rejoin.
+    if (typeof document !== 'undefined' && typeof addEventListener === 'function') {
+      this.onHide = () => { for (const t of this.handles.values()) if (t.published) { t.unpublish(); t.rejoin = true } }
+      this.onShow = e => { if (e.persisted) for (const t of this.handles.values()) if (t.rejoin) { t.rejoin = false; t.publish(t.opts).catch(() => {}) } }
+      addEventListener('pagehide', this.onHide); addEventListener('pageshow', this.onShow)
+    }
   }
 
   now () { return this.peer.now() }
@@ -95,23 +102,32 @@ export class Topics {
             this.sample(r.now, t0, this.now())
             chunk.forEach((x, j) => {
               const s = r.ok?.[j] ? str(r.ok[j]) : ''
-              if (s === 'ok' || s === 'dup') count.set(x, count.get(x) + 1); else if (s === 'future' || s === 'expired') x.skewed = true
+              if (s === 'ok' || s === 'dup') { count.set(x, count.get(x) + 1); x.topic.nodes.add(this.peer.urlOf(e)) } else if (s === 'future' || s === 'expired') x.skewed = true
             })
           } catch { this.markDown(e.key) }
         }
       }))
     }
-    // extra copies: our own store, and every connected neighbour of the topic (over WebRTC)
+    await this.copies(items)
+    return count
+  }
+  // Extra copies: our own store, and every connected neighbour of the topic (over WebRTC).
+  async copies (items) {
     await Promise.allSettled(items.map(async x => {
       await this.peer.store?.put(x.raw)
       await Promise.allSettled(this.#linksFor(x.topic.hex).map(l => this.peer.chanRpc(l.channel, 'cx_tpub', { r: [x.raw] }, 5000)))
     }))
-    return count
+  }
+  // A cx_tpub that outlives a closing page (fetch keepalive); answers are not awaited by the page.
+  sendNow (urls, raw) {
+    const body = encode({ t: random(4), y: 'q', q: 'cx_tpub', a: { r: [raw] } })
+    return urls.map(u => fetch(u.replace(/\/$/, '') + '/krpc', { method: 'POST', headers: { 'content-type': 'text/plain' }, body, keepalive: true }).catch(() => {}))
   }
 
   // Sign fresh records for these topics and store them; one retry with corrected clock skew.
   async publishNow (topics) {
-    const sign = async t => ({ topic: t, raw: await t.sign(this.now() + this.skew() + this.L.lease) })
+    const sign = async t => ({ topic: t, raw: await t.sign(this.now() + this.skew() + (t.opts?.lease ?? this.L.lease)) })
+    for (const t of topics) t.nodes = new Set()
     const items = await Promise.all(topics.map(sign))
     const count = await this.push(items)
     const retry = items.filter(x => !count.get(x) && x.skewed)
@@ -124,9 +140,15 @@ export class Topics {
     return out
   }
 
+  // One timer renews every published topic, at half the shortest lease (default: every 5 min).
   schedule () {
-    if (this.renewTimer || this.closed) return
-    this.renewTimer = unref(setTimeout(() => this.renew(), jitter(this.L.renew, this.L.jitter)))
+    if (this.closed) return
+    const halves = [...this.handles.values()].filter(t => t.published && t.opts?.lease).map(t => t.opts.lease / 2)
+    const at = Date.now() + jitter(Math.min(this.L.renew, ...halves), this.L.jitter)
+    if (this.renewTimer && this.renewAt <= at) return
+    clearTimeout(this.renewTimer)
+    this.renewAt = at
+    this.renewTimer = unref(setTimeout(() => this.renew(), at - Date.now()))
   }
   async renew () {
     this.renewTimer = null
@@ -217,7 +239,7 @@ export class Topics {
   // If both sides try at once, the attempt from the lower address wins (the other side answers busy).
   accept (from, tid) {
     const t = this.handles.get(tid), key = `${tid}|${from}`, mine = this.reserved.get(key)
-    if (this.closed || !t?.subs.size || this.links.has(key)) return false
+    if (this.closed || !t?.wantsLinks() || this.links.has(key)) return false
     if (mine) {
       if (!(mine.out && from < this.peer.address)) return false
       mine.out = false                                           // their attempt replaces ours, same slot
@@ -232,7 +254,7 @@ export class Topics {
   attach (address, tid, channel, kind) {
     const key = `${tid}|${address}`, t = this.handles.get(tid)
     this.reserved.delete(key)
-    if (this.closed || !t?.subs.size || this.links.has(key)) { try { channel.close() } catch {} return }
+    if (this.closed || !t?.wantsLinks() || this.links.has(key)) { try { channel.close() } catch {} return }
     const link = { address, tid, channel, kind }
     this.links.set(key, link)
     channel.binaryType = 'arraybuffer'
@@ -245,12 +267,12 @@ export class Topics {
     for (const [key, l] of this.links) if (l.tid === t.hex) { this.links.delete(key); try { l.channel.close() } catch {} }
   }
   maintainSoon (t) {
-    if (this.closed || !t.subs.size || this.debounce.has(t.hex)) return
+    if (this.closed || !t.wantsLinks() || this.debounce.has(t.hex)) return
     this.debounce.set(t.hex, unref(setTimeout(() => { this.debounce.delete(t.hex); this.maintain(t) }, 1000)))
   }
   // Top up to 4 neighbours from the topic's recent providers (at most 2 attempts per run).
   async maintain (t) {
-    if (this.closed || !t.subs.size || t.maintaining || !this.peer.RTC) return
+    if (this.closed || !t.wantsLinks() || t.maintaining || !this.peer.RTC) return
     t.maintaining = true
     try {
       const c = this.#count(t.hex), now = Date.now()
@@ -328,6 +350,7 @@ export class Topics {
     const published = [...this.handles.values()].filter(t => t.published)
     await Promise.race([Promise.allSettled(published.map(t => t.unpublish())), sleep(3000)])
     this.closed = true
+    if (this.onHide) { removeEventListener('pagehide', this.onHide); removeEventListener('pageshow', this.onShow) }
     clearTimeout(this.renewTimer); clearTimeout(this.rewatchTimer); clearInterval(this.expiry)
     this.renewTimer = this.rewatchTimer = this.expiry = null
     for (const timer of this.debounce.values()) clearTimeout(timer)
@@ -345,43 +368,53 @@ export class Topic {
     this.record = null
     this.subs = new Set()
     this.providers = new Map()     // address -> { seq, exp, presence }
+    this.nodes = new Set()         // storage peer URLs holding our record
   }
 
+  // Sign a record, and its withdrawal (next seq, already expired) right away, so leaving needs no async work.
   async sign (exp) {
-    this.seq = Math.max(this.seq + 1, Date.now())
-    this.record = await makeRecord(this.topics.peer.id, this.id, this.seq, Math.round(exp))
+    const id = this.topics.peer.id, seq = Math.max(this.seq + 1, Date.now())
+    this.record = await makeRecord(id, this.id, seq, Math.round(exp))
+    this.leave = await makeRecord(id, this.id, seq + 1, Math.round(this.topics.now() + this.topics.skew()) - 1)
+    this.seq = seq + 1
     return this.record
   }
+  // Broadcast links, unless every subscription is presence-only (a presence handler, no message handler).
+  wantsLinks () { return [...this.subs].some(s => s.message || !s.presence) }
 
-  // beacon: false = presence only (no Beacon, so topic neighbours can't link to you).
-  async publish ({ beacon = true } = {}) {
+  // beacon: false = presence only (no Beacon, so nobody can link to you). lease: ms, ≤ 10 min; renewed at half.
+  async publish (opts = {}) {
     if (this.topics.closed) throw fail('closed')
+    const lease = opts.lease && Math.max(10e3, Math.min(this.topics.L.lease, opts.lease))
+    this.opts = { ...opts, ...(lease && { lease }) }
     this.published = true
-    if (beacon) await this.topics.ensureBeacon().catch(() => {})
+    if (opts.beacon !== false) await this.topics.ensureBeacon().catch(() => {})
     const stored = (await this.topics.publishNow([this])).get(this) || 0
     this.topics.schedule()
     if (!stored) throw fail('no-storage', 'no storage peer accepted the record')
     return { stored }
   }
+  // Withdraw the lease: the pre-signed withdrawal goes out synchronously, so it survives a closing page.
   async unpublish () {
     if (!this.published) return
     this.published = false
-    const raw = await this.sign(this.topics.now() + this.topics.skew())   // tombstone: newer seq, already expired
-    this.record = null
-    await this.topics.push([{ topic: this, raw }]).catch(() => {})
+    const raw = this.leave
+    this.record = this.leave = null
+    if (!raw) return
+    await Promise.allSettled([...this.topics.sendNow([...this.nodes], raw), this.topics.copies([{ topic: this, raw }])])
   }
   search () { return this.topics.search(this) }
 
   subscribe ({ presence, message } = {}) {
     const s = { presence, message }
     this.subs.add(s)
-    this.topics.ensureBeacon().catch(() => {})
+    if (message || !presence) this.topics.ensureBeacon().catch(() => {})    // only broadcast links need us reachable
     this.topics.rewatch()
     this.topics.maintainSoon(this)
     return () => {
-      if (!this.subs.delete(s) || this.subs.size) return
-      this.topics.dropLinks(this)
-      this.topics.rewatch()
+      if (!this.subs.delete(s)) return
+      if (!this.wantsLinks()) this.topics.dropLinks(this)
+      if (!this.subs.size) this.topics.rewatch()
     }
   }
   broadcast (body) { return this.topics.broadcast(this, body) }
