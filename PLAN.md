@@ -46,6 +46,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 - [x] **Node:** 41 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app)
 - [x] **Bun 1.4 and Deno 2.9:** smoke test (anchors, messages, direct and relayed channels, topics)
 - [x] **Live:** our Beacon round-trips through `relay.pkarr.org`; DNS TXT via DoH
+- [x] **Homepage app:** DOX / APP / STATS, view remembered. APP: identity, peers with honest presence, messages and live chat, topics, follows, live-only updates. Driven end to end in Chromium (`test/app.test.js`); no sideways scroll at 320–420 px
 - [x] **Public anchor** `https://corvax.sloev.workers.dev` (Cloudflare Worker, `worker/`): `test/worker-check.js` passes live; zero-config peers bootstrap from it; its Beacons reach Mainline via the pkarr relay
 - [ ] Firefox and WebKit (CI, run by hand), real Safari
 - [ ] Two browsers on two real networks
