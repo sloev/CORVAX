@@ -1,7 +1,7 @@
 // All crypto comes from WebCrypto (browsers, Node, Bun, Deno). No libraries, no custom maths.
 // One 32-byte seed is the whole secret. Two independent keys are derived from it:
 //   Ed25519 (identity: the address, signatures)   X25519 (encryption: published in the Beacon)
-import { concat, unhex, unb64, utf8, random } from './bytes.js'
+import { concat, unhex, unb64, utf8, random, equal } from './bytes.js'
 
 const subtle = globalThis.crypto?.subtle
 const PKCS8 = { Ed25519: '302e020100300506032b657004220420', X25519: '302e020100300506032b656e04220420' }
@@ -56,4 +56,6 @@ export const encrypt = async (key, iv, data) => new Uint8Array(await subtle.encr
 export const decrypt = async (key, iv, data) => new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv }, key, data))
 export const sha1 = async b => new Uint8Array(await subtle.digest('SHA-1', b))
 export const sha256 = async b => new Uint8Array(await subtle.digest('SHA-256', b))
+// Is r a valid cx_hi reply from `key` to nonce n?
+export const hiOk = async (r, key, n) => r?.k instanceof Uint8Array && equal(r.k, key) && verify(r.k, r.sig, concat(utf8('cx-hi'), n))
 export { random, concat }

@@ -2,7 +2,7 @@
 //   line:   corvax-anchor:<z32 key>@<host>:<port>[;web=<https origin>][;q=<0-100>]
 // Lines are claims. An entry becomes "verified" only after the anchor signs a random nonce
 // (cx_hi), and each service (http, udp, rtc) is scored separately from our own probes.
-import { z32, unz32 } from './bytes.js'
+import { unz32, shuffle } from './bytes.js'
 
 export const LINE_RE = /corvax-anchor:[^\s"'<>`]+/g
 const ALPHA = 0.2, MAX = 1000, MAX_LINE = 255, DAY = 86400e3
@@ -101,8 +101,7 @@ export class Book {
   shared (mode = 'native') {
     const pub = e => !e.lan && (this.allowPrivate || isPublic(e.host))
     const top = this.best(32, mode, pub), rest = [...this.entries.values()].filter(e => pub(e) && !top.includes(e))
-    for (let i = rest.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [rest[i], rest[j]] = [rest[j], rest[i]] }
-    return [...top, ...rest.slice(0, 8)].map(e => formatLine(e, this.score(e, mode))).join('\n')
+    return [...top, ...shuffle(rest).slice(0, 8)].map(e => formatLine(e, this.score(e, mode))).join('\n')
   }
 
   // Entries due for a probe: unverified first (at most `fresh` of them), then the longest unprobed.
@@ -123,4 +122,3 @@ export class Book {
   toText () { return this.best(MAX).map(e => formatLine(e, this.score(e))).join('\n') }
 }
 
-export const keyOf = pub => z32(pub)

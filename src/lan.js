@@ -48,7 +48,6 @@ export async function startLan ({ port = 4798, mdns = true, lines, onFound }) {
   }
 }
 
-// ---- just enough DNS for mDNS TXT -------------------------------------------------------------
 const labels = name => [...name.split('.').flatMap(l => { const b = te.encode(l); return [b.length, ...b] }), 0]
 function dnsQuery () {
   return Uint8Array.from([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, ...labels(NAME), 0, 16, 0, 1])

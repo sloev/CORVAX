@@ -33,7 +33,7 @@ test(`homepage app (${name}): renders, goes live, topics and messages between tw
     await p.getByText('Your address:').waitFor({ timeout: 15000 })
     return p.locator('span', { hasText: 'Your address:' }).locator('code').textContent()
   }
-  const [addrA, addrB] = [await live(A.page), await live(B.page)]
+  const addrA = await live(A.page); await live(B.page)
   assert.match(addrA, /^[a-z0-9]{52}$/)
 
   // topics: A subscribes + publishes, B subscribes + publishes and searches, then A broadcasts
@@ -60,7 +60,6 @@ test(`homepage app (${name}): renders, goes live, topics and messages between tw
   await msgCard(B.page).getByLabel('Message').fill('hello from B')
   await msgCard(B.page).getByRole('button', { name: 'Send' }).click()
   await msgCard(A.page).locator('.log').getByText(/from .*: hello from B/).waitFor({ timeout: 10000 })
-  void addrB
 
   // client-side storage: a reload keeps the identity, the anchor book and the joined topics, and goes live again
   const stored = await A.page.evaluate(() => Object.fromEntries(Object.keys(localStorage).filter(k => k.startsWith('corvax.')).map(k => [k, localStorage.getItem(k)])))

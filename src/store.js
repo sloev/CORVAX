@@ -4,7 +4,8 @@
 //   watch([ids], cursor) snapshot or coalesced delta, long poll ≤ 25 s
 // Tombstones (exp ≤ now, higher seq) are kept until now + lease + skew so old records can't be replayed.
 import { readRecord, LIMITS } from './topic.js'
-import { hex, random } from './bytes.js'
+import { sign } from './crypto.js'
+import { hex, random, concat, utf8 } from './bytes.js'
 
 export class TopicStore {
   constructor ({ now = () => Date.now(), lease = LIMITS.lease, skew = LIMITS.skew, perProvider = 64, maxRecords = 50000,
@@ -101,4 +102,23 @@ export class TopicStore {
     if (at < oldest - 1) return null
     return at
   }
+}
+
+// cx_hi and the storage queries, answered identically by every peer over UDP, HTTP and WebRTC.
+export async function serve ({ id, store, line, stored }, q, a) {
+  const list = (x, max, ok) => Array.isArray(x) ? x.filter(ok).slice(0, max) : []
+  if (q === 'cx_hi') {
+    if (!(a.n instanceof Uint8Array) || a.n.length > 64) throw [203, 'bad nonce']
+    return { k: id.pub, sig: await sign(id, concat(utf8('cx-hi'), a.n)), ...(line && { line }), ...(store && { st: 1 }) }
+  }
+  if (q !== 'cx_tpub' && q !== 'cx_tfind') throw [204, 'method unknown']
+  if (!store) throw [204, 'storage disabled on this peer']
+  if (q === 'cx_tfind') return { r: store.find(list(a.t, 16, b => b instanceof Uint8Array && b.length === 32)), now: Date.now() }
+  const ok = []
+  for (const raw of list(a.r, 32, r => r instanceof Uint8Array && r.length <= 512)) {
+    const s = await store.put(raw)
+    ok.push(utf8(s))
+    if (s === 'ok') stored?.(raw)
+  }
+  return { ok, now: Date.now() }
 }

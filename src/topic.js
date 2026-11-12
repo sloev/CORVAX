@@ -26,7 +26,6 @@ export const topicId = async name => sha256(utf8('cx/topic:' + normalize(name)))
 const is = (b, n) => b instanceof Uint8Array && b.length === n
 const int = x => Number.isSafeInteger(x)
 
-// ---- provider records ------------------------------------------------------------------------
 export async function makeRecord (id, t, seq, exp) {
   const fields = encode({ t, k: id.pub, seq, exp })
   return encode({ t, k: id.pub, seq, exp, sig: await sign(id, concat(utf8('cx-topic'), fields)) })
@@ -42,7 +41,6 @@ export async function readRecord (raw) {
   return { t: r.t, k: r.k, seq: r.seq, exp: r.exp, raw: encode({ t: r.t, k: r.k, seq: r.seq, exp: r.exp, sig: r.sig }) }
 }
 
-// ---- broadcast frames ----------------------------------------------------------------------------
 export async function makeFrame (id, t, body, record, hop = LIMITS.hops) {
   const msg = { t, id: random(16), ts: Date.now(), from: id.pub, body }
   return { ...msg, p: record, hop, sig: await sign(id, concat(utf8('cx-tb'), encode(msg))) }

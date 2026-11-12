@@ -2,31 +2,27 @@
 // resolves others, exchanges signed+encrypted messages through anchors' inboxes, and opens
 // DataChannels (direct, or relayed by a third peer). Uses only fetch + WebCrypto + WebRTC,
 // so the same file runs in browsers, Node, Bun and Deno.
-import { identity, supported, sign, verify, sha1 } from './crypto.js'
+import { identity, supported, sign, sha1, hiOk } from './crypto.js'
 import { seal, open, MAX_AGE } from './message.js'
 import { makeBeacon, verifyBeacon, fields } from './record.js'
 import { encode, decode } from './bencode.js'
 import { Book, parseLine, formatLine } from './book.js'
-import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, concat, equal } from './bytes.js'
+import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, equal, fail, sleep, CorvaxError } from './bytes.js'
+export { CorvaxError }
 import * as rtc from './rtc.js'
 import * as relay from './relay.js'
 import baked from './anchors.js'
 import { Topics } from './topics.js'
-import { TopicStore } from './store.js'
-
-export class CorvaxError extends Error {
-  constructor (code, message) { super(message || code); this.code = code }
-}
+import { TopicStore, serve } from './store.js'
 
 const isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined'
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const REPUBLISH = 30 * 60e3
 
 export const hostUrl = e => `http://${e.host.includes(':') ? `[${e.host}]` : e.host}:${e.port}`
 
 export class Peer {
   static async create (o = {}) {
-    if (!await supported()) throw new CorvaxError('unsupported', 'this runtime lacks WebCrypto Ed25519/X25519')
+    if (!await supported()) throw fail('unsupported', 'this runtime lacks WebCrypto Ed25519/X25519')
     const p = new Peer()
     p.id = await identity(typeof o.seed === 'string' ? unhex(o.seed) : (o.seed || undefined))
     p.address = z32(p.id.pub)
@@ -59,7 +55,6 @@ export class Peer {
     return p
   }
 
-  // ---- anchor book ---------------------------------------------------------------------------
   async bootstrap (o = {}) {
     for (const t of [...(o.anchors || []), baked, await this.platform.loadCache?.() || '']) this.book.add(t)   // explicit first: probed first
     if (this.self) { this.book.add(this.self.line); this.book.record(this.self.key, 'id', true) }
@@ -94,13 +89,11 @@ export class Peer {
     await Promise.allSettled(due.map(e => this.hi(e)))
   }
   async hi (e) {
-    const n = random(16), t0 = Date.now()
-    let r
-    try { r = await this.rpc(this.urlOf(e), 'cx_hi', { n }, { timeout: 5000, retries: 0 }) } catch { return this.book.record(e.key, 'http', false) }
-    const ok = r.k instanceof Uint8Array && equal(r.k, unz32(e.key)) && await verify(r.k, r.sig, concat(utf8('cx-hi'), n))
+    const n = random(16), t0 = Date.now(), r = await this.rpc(this.urlOf(e), 'cx_hi', { n }, { timeout: 5000, retries: 0 }).catch(() => null)
+    if (!r) return this.book.record(e.key, 'http', false)
+    const ok = await hiOk(r, unz32(e.key), n)
     this.book.record(e.key, 'id', ok)
     if (ok) { this.book.get(e.key).storage = !!r.st; this.book.record(e.key, 'http', true, Date.now() - t0) }
-    return ok
   }
   anchors () { return this.book.shared(isBrowser ? 'browser' : 'native') }
   addAnchors (text) { return this.book.add(text).length }
@@ -121,9 +114,8 @@ export class Peer {
       .map(e => ({ urls: `stun:${e.host.includes(':') ? `[${e.host}]` : e.host}:${e.port}` }))
   }
 
-  // ---- KRPC over HTTP --------------------------------------------------------------------------
   async rpc (url, q, a = {}, { timeout = 8000, retries = 2, signal: extra } = {}) {
-    if (!url) throw new CorvaxError('no-anchor', 'no reachable anchor')
+    if (!url) throw fail('no-anchor', 'no reachable anchor')
     const body = encode({ t: random(4), y: 'q', q, a, ro: 1 })       // same t on retries → executed once
     for (let i = 0; ; i++) {
       try {
@@ -132,7 +124,7 @@ export class Peer {
         const m = decode(new Uint8Array(await res.arrayBuffer()))
         if (m.y && str(m.y) === 'r') return m.r
         const [code, msg] = Array.isArray(m.e) ? m.e : [0, 'bad reply']
-        throw Object.assign(new CorvaxError('remote', `${q}: ${code} ${str(msg instanceof Uint8Array ? msg : utf8(String(msg)))}`), { remote: true })
+        throw Object.assign(fail('remote', `${q}: ${code} ${str(msg instanceof Uint8Array ? msg : utf8(String(msg)))}`), { remote: true })
       } catch (e) {
         if (e.remote || this.abort.signal.aborted || extra?.aborted || i >= retries) throw e
         await sleep(300 * 2 ** i)
@@ -140,14 +132,13 @@ export class Peer {
     }
   }
 
-  // ---- Beacon ------------------------------------------------------------------------------------
   async publish (extra = {}) {
-    if (!this.inboxes.length) throw new CorvaxError('no-anchor', 'no verified anchor to publish through')
+    if (!this.inboxes.length) throw fail('no-anchor', 'no verified anchor to publish through')
     const rec = await makeBeacon(this.id, { ...extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
     const targets = [...this.inboxes.map(ib => ib.url), ...this.book.best(2, 'native', e => e.verified).map(e => this.urlOf(e))]
     const ok = await Promise.allSettled([...new Set(targets.filter(Boolean))].map(u =>
       this.rpc(u, 'put', { k: rec.pub, seq: rec.seq, sig: rec.sig, v: rec.v })))
-    if (!ok.some(r => r.status === 'fulfilled')) throw new CorvaxError('no-anchor', 'no anchor accepted the beacon')
+    if (!ok.some(r => r.status === 'fulfilled')) throw fail('no-anchor', 'no anchor accepted the beacon')
     this.beaconSeq = rec.seq
     clearTimeout(this.republish)
     this.republish = setTimeout(() => this.publish(extra).catch(() => {}), REPUBLISH)
@@ -175,10 +166,9 @@ export class Peer {
     return beacon
   }
 
-  // ---- messages ----------------------------------------------------------------------------------
   async signal (address, body, beacon) {
     beacon ??= await this.resolve(address)
-    if (!beacon?.x) throw new CorvaxError('not-found', `no record for ${address}`)
+    if (!beacon?.x) throw fail('not-found', `no record for ${address}`)
     const to = unz32(address), msg = await seal(this.id, to, beacon.x, body)
     let last = 'no usable anchor line'
     for (const line of beacon.c) {
@@ -186,7 +176,7 @@ export class Peer {
       if (!url) continue
       try { await this.rpc(url, 'cx_send', { to, msg }); return true } catch (err) { last = err.message }
     }
-    throw new CorvaxError('no-anchor', `no inbox of ${address} is reachable (${last})`)
+    throw fail('no-anchor', `no inbox of ${address} is reachable (${last})`)
   }
   send (address, body) { return this.signal(address, { app: body }) }
   on (fn) { this.handlers.add(fn); return () => this.handlers.delete(fn) }
@@ -221,7 +211,6 @@ export class Peer {
     }
   }
 
-  // ---- connections -------------------------------------------------------------------------------
   accept (fn) { this.acceptors.add(fn); return () => this.acceptors.delete(fn) }
 
   // purpose 'topic' (with tp = topic id hex) is used by topic neighbours; apps use the default.
@@ -234,33 +223,16 @@ export class Peer {
     return relay.via(this, address, { timeout: timeout * 3, purpose, tp })
   }
 
-  // ---- KRPC over a DataChannel --------------------------------------------------------------------
   // The same queries as over UDP and HTTP, as text frames "K" + base64url(bencode), on the `cx` control
   // channel of any connection or on a topic link. So browsers and NATed peers can serve storage too.
   // (Only topic-membership records are ever stored; broadcasts never are.)
-  async answer (q, a) {
-    if (q === 'cx_hi') {
-      if (!(a.n instanceof Uint8Array) || a.n.length > 64) throw [203, 'bad nonce']
-      return { k: this.id.pub, sig: await sign(this.id, concat(utf8('cx-hi'), a.n)), ...(this.store && { st: 1 }) }
-    }
-    if (q !== 'cx_tpub' && q !== 'cx_tfind') throw [204, 'method unknown']
-    if (!this.store) throw [204, 'storage disabled on this peer']
-    const list = (x, max, ok) => Array.isArray(x) ? x.filter(ok).slice(0, max) : []
-    if (q === 'cx_tfind') return { r: this.store.find(list(a.t, 16, b => b instanceof Uint8Array && b.length === 32)), now: Date.now() }
-    const ok = []
-    for (const raw of list(a.r, 32, r => r instanceof Uint8Array && r.length <= 512)) {
-      const s = await this.store.put(raw)
-      ok.push(utf8(s))
-      if (s === 'ok') this.topics.local(raw).catch(() => {})
-    }
-    return { ok, now: Date.now() }
-  }
+  answer (q, a) { return serve({ id: this.id, store: this.store, stored: raw => this.topics.local(raw).catch(() => {}) }, q, a) }
   chanRpc (ch, q, a = {}, timeout = 8000) {
     const st = ch.cxRpc ||= new Map(), t = random(4)
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { st.delete(hex(t)); reject(new CorvaxError('timeout', `${q} over WebRTC timed out`)) }, timeout)
+      const timer = setTimeout(() => { st.delete(hex(t)); reject(fail('timeout', `${q} over WebRTC timed out`)) }, timeout)
       timer.unref?.()
-      st.set(hex(t), m => { clearTimeout(timer); m.r ? resolve(m.r) : reject(new CorvaxError('remote', `${q}: ${m.e?.[0]}`)) })
+      st.set(hex(t), m => { clearTimeout(timer); m.r ? resolve(m.r) : reject(fail('remote', `${q}: ${m.e?.[0]}`)) })
       try { ch.send('K' + b64(encode({ t, y: 'q', q, a }))) } catch (e) { clearTimeout(timer); st.delete(hex(t)); reject(e) }
     })
   }

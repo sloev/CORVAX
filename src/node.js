@@ -8,13 +8,12 @@ import { join, dirname } from 'node:path'
 import { DHT, MAINLINE, ANCHOR_TOPIC } from './dht.js'
 import { Book, formatLine } from './book.js'
 import { Peer, hostUrl } from './peer.js'
-import { identity, sha1, verify, random } from './crypto.js'
-import { installHandlers, httpServer, Inboxes } from './anchor.js'
+import { identity, sha1, random, hiOk } from './crypto.js'
+import { installHandlers, httpServer, Inboxes, post } from './anchor.js'
 import { startLan } from './lan.js'
 import { isStun, stunReply } from './stun.js'
-import { encode, decode } from './bencode.js'
 import { TopicStore } from './store.js'
-import { hex, unhex, utf8, str, z32, concat, equal, unz32 } from './bytes.js'
+import { hex, unhex, utf8, str, z32, unz32 } from './bytes.js'
 
 const DIR = join(homedir(), '.config', 'corvax')
 
@@ -120,33 +119,23 @@ export class CorvaxNode {
     await this.probe(this.book.due(64))
   }
 
-  // UDP cx_hi to an address we only know as ip:port (Mainline results): learns key + anchor line.
+  // cx_hi to an address known only as ip:port (Mainline results): learns its key and anchor line.
   async hiUdp ({ host, port }) {
     const n = random(16), r = await this.dht.query({ host, port }, 'cx_hi', { n })
-    if (r?.k instanceof Uint8Array && r.line && await verify(r.k, r.sig, concat(utf8('cx-hi'), n))) this.book.add(str(r.line))
+    if (r?.line && await hiOk(r, r.k, n)) this.book.add(str(r.line))
   }
 
-  // Probe entries over UDP (identity + udp) and HTTP (http).
+  // Probe entries over UDP and HTTP: identity, per-service reachability, storage flag.
   async probe (entries) {
     await Promise.all(entries.filter(e => e.key !== this.key).map(async e => {
-      const n = random(16), t0 = Date.now()
-      const r = await this.dht.query({ host: e.host, port: e.port }, 'cx_hi', { n })
-      if (r) {
-        const ok = r.k instanceof Uint8Array && equal(r.k, unz32(e.key)) && await verify(r.k, r.sig, concat(utf8('cx-hi'), n))
-        this.book.record(e.key, 'id', ok)
-        if (!ok) return
-        this.book.get(e.key).storage = !!r.st
-        this.book.record(e.key, 'udp', true, Date.now() - t0)
-      } else this.book.record(e.key, 'udp', false)
-      if (!this.book.get(e.key)) return
-      try {
-        const n2 = random(16), url = e.web || hostUrl(e)
-        const res = await fetch(`${url}/krpc`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: encode({ t: random(4), y: 'q', q: 'cx_hi', a: { n: n2 } }), signal: AbortSignal.timeout(4000) })
-        const m = decode(new Uint8Array(await res.arrayBuffer()))
-        const ok = m.r?.k instanceof Uint8Array && equal(m.r.k, unz32(e.key)) && await verify(m.r.k, m.r.sig, concat(utf8('cx-hi'), n2))
-        this.book.record(e.key, 'id', ok)
-        if (ok) this.book.record(e.key, 'http', true)
-      } catch { this.book.record(e.key, 'http', false) }
+      const n = random(16), key = unz32(e.key), t0 = Date.now()
+      for (const [service, r] of [['udp', await this.dht.query({ host: e.host, port: e.port }, 'cx_hi', { n })],
+        ['http', await post(e.web || hostUrl(e), 'cx_hi', { n }).catch(() => null)]]) {
+        if (!this.book.get(e.key)) return
+        if (r && !await hiOk(r, key, n)) return this.book.record(e.key, 'id', false)    // someone else's key: dropped
+        if (r) { this.book.record(e.key, 'id', true); this.book.get(e.key).storage = !!r.st }
+        this.book.record(e.key, service, !!r, Date.now() - t0)
+      }
     }))
   }
 

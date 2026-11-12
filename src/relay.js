@@ -4,25 +4,22 @@
 //   A, B → C  on the control channel: {cx:'bridge', sid, to: other}; C pairs them → {cx:'bridged'}
 //   frames  sid 9 | counter 8 | AES-GCM_Kdir(type 1 | data)   — end-to-end; C only sees ciphertext
 import { ephemeral, ecdh, hkdf, aesKey, encrypt, decrypt } from './crypto.js'
-import { b64, unb64, random, concat, utf8, str, u64, readU64 } from './bytes.js'
+import { b64, unb64, random, concat, utf8, str, u64, readU64, fail, toWire, bytesOf } from './bytes.js'
 import * as rtc from './rtc.js'
 
-const err = (code, message) => Object.assign(new Error(message || code), { code })
 const MAX_FRAME = 16 * 1024, HOUR_BYTES = 1e9, IDLE = 120e3
-const toWire = u8 => typeof Buffer !== 'undefined' ? Buffer.from(u8.buffer, u8.byteOffset, u8.length) : u8
-const bytesOf = d => d instanceof ArrayBuffer ? new Uint8Array(d) : ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : null
 const waiters = new Map()      // sid -> { resolve, reject } for A waiting on B's answer
 
-// ---- A: ask B to meet through a third peer ---------------------------------------------------
+// A: ask B to meet through a third peer
 export async function via (peer, address, { timeout = 30000, purpose = 'app', tp } = {}) {
   const beacon = await peer.resolve(address)
-  if (!beacon) throw err('not-found')
+  if (!beacon) throw fail('not-found')
   const sid = b64(random(9)), eph = await ephemeral()
   const candidates = [...peer.conns.keys(), ...peer.book.best(8, 'native', e => e.verified).map(e => e.key)]
   const list = [...new Set(candidates)].filter(a => a !== address && a !== peer.address).slice(0, 8)
-  if (!list.length) throw err('no-relay', 'no peer to relay through')
+  if (!list.length) throw fail('no-relay', 'no peer to relay through')
   const answer = new Promise((resolve, reject) => waiters.set(sid, { resolve, reject }))
-  const timer = setTimeout(() => waiters.get(sid)?.reject(err('no-relay', 'no answer')), timeout)
+  const timer = setTimeout(() => waiters.get(sid)?.reject(fail('no-relay', 'no answer')), timeout)
   timer.unref?.()
   try {
     await peer.signal(address, { cx: 'via?', sid, e: b64(eph.pub), via: list, p: purpose, ...(tp && { tp }) }, beacon)
@@ -37,11 +34,11 @@ export async function via (peer, address, { timeout = 30000, purpose = 'app', tp
 
 const connTo = (peer, address) => rtc.direct(peer, address, { purpose: 'relay', timeout: 8000 }).then(() => peer.conns.get(address))
 
-// ---- B: pick C, answer A, ask C to bridge -----------------------------------------------------
+// B: pick C, answer A, ask C to bridge
 export async function onSignal (peer, from, body) {
   const sid = String(body.sid || '')
   if (body.cx === 'via') return waiters.get(sid)?.resolve({ c: String(body.c), e: String(body.e) })
-  if (body.cx === 'via-no') return waiters.get(sid)?.reject(err('no-relay', 'peer found no common relay'))
+  if (body.cx === 'via-no') return waiters.get(sid)?.reject(fail('no-relay', 'peer found no common relay'))
   if (body.cx !== 'via?' || !Array.isArray(body.via)) return
   const tp = body.p === 'topic' ? String(body.tp || '') : null
   if (!tp && !peer.acceptors.size) return
@@ -61,7 +58,7 @@ export async function onSignal (peer, from, body) {
   for (const fn of peer.acceptors) fn({ from, channel: ch, kind: 'peer', via: c })
 }
 
-// ---- C (and endpoints): control channel traffic -------------------------------------------------
+// C (and endpoints): control channel traffic
 export function onControl (peer, conn, data) {
   if (typeof data === 'string' && data[0] === 'K') return peer.onChanText(conn.ctl, data)   // KRPC over WebRTC
   if (typeof data === 'string') {
@@ -122,8 +119,8 @@ export function onClosed (peer, conn) {
   for (const ch of peer.channels.values()) if (ch.conn === conn) ch.close(false)
 }
 
-// ---- the relayed channel: same surface as RTCDataChannel ----------------------------------------
-export class RelayChannel {
+// the relayed channel: same surface as RTCDataChannel
+class RelayChannel {
   static async create (peer, conn, sid, myEph, theirEph, role) {
     const shared = await ecdh(myEph, theirEph), info = d => concat(utf8('cx/relay'), unb64(sid), utf8(d))
     const ab = await aesKey(await hkdf(shared, info('a2b'))), ba = await aesKey(await hkdf(shared, info('b2a')))
@@ -142,7 +139,7 @@ export class RelayChannel {
   }
   ready (ms) {
     let timer
-    return Promise.race([this.whenOpen, new Promise((resolve, reject) => { timer = setTimeout(() => reject(err('no-relay', 'relay did not bridge')), ms); timer.unref?.() })])
+    return Promise.race([this.whenOpen, new Promise((resolve, reject) => { timer = setTimeout(() => reject(fail('no-relay', 'relay did not bridge')), ms); timer.unref?.() })])
       .finally(() => clearTimeout(timer))
   }
 

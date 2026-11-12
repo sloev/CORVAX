@@ -24,7 +24,6 @@ export class DHT {
     this.tid = random(2)[0] << 8
   }
 
-  // ---- incoming ----------------------------------------------------------------------------
   async receive (buf, from) {
     let m
     try { m = decode(buf) } catch { return }
@@ -83,7 +82,6 @@ export class DHT {
     throw [204, 'method unknown']
   }
 
-  // ---- outgoing ----------------------------------------------------------------------------
   query (to, q, a = {}) {
     const t = Uint8Array.of(this.tid >> 8 & 255, this.tid & 255)
     this.tid = (this.tid + 1) & 0xffff
@@ -170,7 +168,6 @@ export class DHT {
     return equal(t, await this.token(from, w)) || equal(t, await this.token(from, w - 1))
   }
 
-  // ---- internals ---------------------------------------------------------------------------
   #remember (n) {
     this.nodes.delete(key(n))
     this.nodes.set(key(n), { id: n.id, host: n.host, port: n.port, seen: Date.now() })
@@ -202,7 +199,7 @@ export class DHT {
   }
 }
 
-export function parseNodes (b) {
+function parseNodes (b) {
   const out = []
   for (let i = 0; b instanceof Uint8Array && i + 26 <= b.length; i += 26) {
     out.push({ id: b.slice(i, i + 20), host: b.subarray(i + 20, i + 24).join('.'), port: b[i + 24] << 8 | b[i + 25] })

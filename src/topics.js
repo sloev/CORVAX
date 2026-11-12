@@ -1,18 +1,11 @@
-// Peer side of topics: presence (leased provider records on storage peers) and best-effort broadcast.
-//   publish/renew/unpublish  → the 5 XOR-closest storage peers, batched, one timer, ±20 % jitter
-//   search                   → cx_tfind on the 8 closest; every record is verified here (storage is untrusted)
-//   subscribe                → one multiplexed cx_twatch long poll per storage peer + topic neighbours
-//   broadcast                → signed frame to ≤ 4 neighbours; receivers verify, dedup, rate-limit, forward to ≤ 3
+// Topics, peer side: leased presence on storage peers and best-effort broadcast (SPEC §10).
+//   publish/renew → 4 closest established + 1 random storage peers, own store, neighbours; batched, one timer
+//   search        → own store, neighbours, 6 + 2 storage peers; every record verified here (storage is untrusted)
+//   subscribe     → one cx_twatch long poll per storage peer, plus ≤ 4 neighbour links for broadcast
 import { topicId, normalize, makeRecord, readRecord, makeFrame, encodeFrame, checkFrame, LIMITS } from './topic.js'
-import { hex, z32, unz32, utf8, str, xor, compare } from './bytes.js'
+import { hex, z32, unz32, utf8, str, xor, compare, fail, sleep, unref, shuffle, bytesOf, toWire } from './bytes.js'
 
-const err = (code, message) => Object.assign(new Error(message || code), { code })
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const jitter = (ms, j) => ms * (1 - j + 2 * j * Math.random())
-const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]] } return a }
-const bytesOf = d => d instanceof ArrayBuffer ? new Uint8Array(d) : ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : null
-const toWire = u8 => typeof Buffer !== 'undefined' ? Buffer.from(u8.buffer, u8.byteOffset, u8.length) : u8
-const unref = t => { t?.unref?.(); return t }
 
 export class Topics {
   constructor (peer, limits = {}) {
@@ -69,7 +62,6 @@ export class Topics {
     const near = [...byXor(all.filter(e => score(e) >= this.L.established)), ...byXor(all.filter(e => score(e) < this.L.established))].slice(0, closest)
     return [...near, ...shuffle(all.filter(e => !near.includes(e))).slice(0, random)]
   }
-  nodes (id, n) { return this.pick(id, n, 0) }
   // Records that reach this peer by any path (HTTP storage, a neighbour's cx_tpub) update local presence.
   async local (raw) {
     const rec = await readRecord(raw), t = rec && this.handles.get(hex(rec.t))
@@ -77,7 +69,6 @@ export class Topics {
   }
   markDown (key) { this.down.set(key, Date.now() + 5 * 60e3); this.peer.book.record(key, 'http', false) }
 
-  // ---- presence: publish / renew / unpublish ----------------------------------------------------
   // Send records to the closest nodes, falling back to the next ones, until each has `replicas` copies.
   async push (items) {
     const want = this.L.closest + this.L.random, count = new Map(), tried = new Map(), ranked = new Map()
@@ -104,7 +95,7 @@ export class Topics {
             this.sample(r.now, t0, this.now())
             chunk.forEach((x, j) => {
               const s = r.ok?.[j] ? str(r.ok[j]) : ''
-              if (s === 'ok' || s === 'dup') { count.set(x, count.get(x) + 1); x.nodes?.push(e.key) } else if (s === 'future' || s === 'expired') x.skewed = true
+              if (s === 'ok' || s === 'dup') count.set(x, count.get(x) + 1); else if (s === 'future' || s === 'expired') x.skewed = true
             })
           } catch { this.markDown(e.key) }
         }
@@ -120,7 +111,7 @@ export class Topics {
 
   // Sign fresh records for these topics and store them; one retry with corrected clock skew.
   async publishNow (topics) {
-    const sign = async t => ({ topic: t, raw: await t.sign(this.now() + this.skew() + this.L.lease), nodes: [] })
+    const sign = async t => ({ topic: t, raw: await t.sign(this.now() + this.skew() + this.L.lease) })
     const items = await Promise.all(topics.map(sign))
     const count = await this.push(items)
     const retry = items.filter(x => !count.get(x) && x.skewed)
@@ -146,7 +137,6 @@ export class Topics {
     if (published.length) this.schedule()
   }
 
-  // ---- search and watch --------------------------------------------------------------------------
   async search (topic) {
     const found = []
     for (const raw of this.peer.store?.find([topic.id]) || []) found.push(raw)
@@ -216,7 +206,6 @@ export class Topics {
   }
   #expire () { for (const t of this.handles.values()) if (t.subs.size) t.expire() }
 
-  // ---- topic neighbours ----------------------------------------------------------------------------
   #count (tid) {
     const now = Date.now()
     for (const [k, r] of this.reserved) if (r.until < now) this.reserved.delete(k)
@@ -283,7 +272,6 @@ export class Topics {
     } finally { t.maintaining = false }
   }
 
-  // ---- broadcast ------------------------------------------------------------------------------------
   #linksFor (tid) { return [...this.links.values()].filter(l => l.tid === tid) }
   #rate (tid, from) {
     const key = `${tid}|${from}`, now = Date.now(), list = (this.rates.get(key) || []).filter(x => now - x < 60e3)
@@ -301,10 +289,10 @@ export class Topics {
   #send (link, wire) { try { link.channel.send(toWire(wire)) } catch { this.#drop('send') } }
 
   async broadcast (t, body) {
-    if (!t.published || !t.record) throw err('not-published', 'publish() the topic before broadcasting')
+    if (!t.published || !t.record) throw fail('not-published', 'publish() the topic before broadcasting')
     const bytes = utf8(JSON.stringify(body ?? null))
-    if (bytes.length > this.L.body) throw err('too-large', `broadcast body is ${bytes.length} bytes (max ${this.L.body})`)
-    if (!this.#rate(t.hex, this.peer.address)) throw err('rate-limited', `at most ${this.L.rate} broadcasts per minute per topic`)
+    if (bytes.length > this.L.body) throw fail('too-large', `broadcast body is ${bytes.length} bytes (max ${this.L.body})`)
+    if (!this.#rate(t.hex, this.peer.address)) throw fail('rate-limited', `at most ${this.L.rate} broadcasts per minute per topic`)
     const f = await makeFrame(this.peer.id, t.id, bytes, t.record, this.L.hops)
     this.#remember(hex(f.id))
     const wire = encodeFrame(f), links = this.#linksFor(t.hex)
@@ -366,12 +354,12 @@ export class Topic {
   }
 
   async publish () {
-    if (this.topics.closed) throw err('closed')
+    if (this.topics.closed) throw fail('closed')
     this.published = true
     await this.topics.ensureBeacon().catch(() => {})
     const stored = (await this.topics.publishNow([this])).get(this) || 0
     this.topics.schedule()
-    if (!stored) throw err('no-storage', 'no storage peer accepted the record')
+    if (!stored) throw fail('no-storage', 'no storage peer accepted the record')
     return { stored }
   }
   async unpublish () {

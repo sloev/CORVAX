@@ -1,4 +1,4 @@
-// Byte helpers. Uint8Array everywhere, no Buffer, so it runs in every JS runtime.
+// Byte helpers (Uint8Array everywhere, so it runs in every JS runtime) and a few shared utilities.
 export const utf8 = s => new TextEncoder().encode(s)
 export const str = b => new TextDecoder().decode(b)
 export const random = n => crypto.getRandomValues(new Uint8Array(n))
@@ -42,3 +42,11 @@ export const unz32 = s => {
   }
   return Uint8Array.from(out)
 }
+
+export class CorvaxError extends Error { constructor (code, message) { super(message || code); this.code = code } }
+export const fail = (code, message) => new CorvaxError(code, message)
+export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+export const unref = t => { t?.unref?.(); return t }
+export const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]] } return a }
+export const bytesOf = d => d instanceof ArrayBuffer ? new Uint8Array(d) : ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : null
+export const toWire = u8 => typeof Buffer !== 'undefined' ? Buffer.from(u8.buffer, u8.byteOffset, u8.length) : u8   // werift wants Buffer

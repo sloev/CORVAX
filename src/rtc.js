@@ -1,14 +1,13 @@
 // Direct connections: plain WebRTC offer/answer, carried as signed+encrypted messages.
 // Every connection has two pre-agreed DataChannels: id 0 "app" (handed to the app) and
 // id 1 "cx" (control: used to relay for others).
-import { b64, random } from './bytes.js'
+import { b64, random, fail } from './bytes.js'
 import * as relay from './relay.js'
 
-const err = (code, message) => Object.assign(new Error(message || code), { code })
 
 function withTimeout (promise, ms, code) {
   let timer
-  return Promise.race([promise, new Promise((resolve, reject) => { timer = setTimeout(() => reject(err(code)), ms); timer.unref?.() })])
+  return Promise.race([promise, new Promise((resolve, reject) => { timer = setTimeout(() => reject(fail(code)), ms); timer.unref?.() })])
     .finally(() => clearTimeout(timer))
 }
 const opened = ch => new Promise(resolve => {
@@ -47,13 +46,13 @@ function register (peer, address, s) {
 }
 
 export async function direct (peer, address, { timeout = 10000, purpose = 'app', tp } = {}) {
-  if (!peer.RTC) throw err('no-webrtc', 'no RTCPeerConnection available (pass one to Peer.create)')
+  if (!peer.RTC) throw fail('no-webrtc', 'no RTCPeerConnection available (pass one to Peer.create)')
   const beacon = await peer.resolve(address)
-  if (!beacon) throw err('not-found', `no record for ${address}`)
-  if (peer.blockDirect.has(address)) throw err('ice-failed', 'direct path blocked (test hook)')
+  if (!beacon) throw fail('not-found', `no record for ${address}`)
+  if (peer.blockDirect.has(address)) throw fail('ice-failed', 'direct path blocked (test hook)')
   const sid = b64(random(9))
   const s = session(peer, address, sid, beacon)
-  const answered = new Promise((resolve, reject) => { s.answered = resolve; s.busy = () => reject(err('busy', 'peer declined')) })
+  const answered = new Promise((resolve, reject) => { s.answered = resolve; s.busy = () => reject(fail('busy', 'peer declined')) })
   try {
     await s.pc.setLocalDescription(await s.pc.createOffer())
     await peer.signal(address, { cx: 'offer', sid, sdp: s.pc.localDescription.sdp, p: purpose, ...(tp && { tp }) }, beacon)

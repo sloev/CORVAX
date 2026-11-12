@@ -89,7 +89,7 @@ test('one long poll per storage peer for many topics; lost cursor → snapshot r
   for (const name of ['t1', 't2', 't3', 't4']) (await w.topic(name)).subscribe({ presence: e => seen.push([name, e.presence]) })
   await until(() => w.topics.polls.size > 0, 5000)
   const plan = new Set()
-  for (const name of ['t1', 't2', 't3', 't4']) for (const e of w.topics.nodes(await topicId(name), 4)) plan.add(e.key)
+  for (const name of ['t1', 't2', 't3', 't4']) for (const e of w.topics.pick(await topicId(name), 4)) plan.add(e.key)
   await until(() => w.topics.polls.size === plan.size, 5000)
   for (const [key, p] of w.topics.polls) assert.ok(plan.has(key) && p.topics.size >= 1)
   const mine = new Set(await Promise.all(['t1', 't2', 't3', 't4'].map(async n => hex(await topicId(n)))))

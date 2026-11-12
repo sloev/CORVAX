@@ -52,7 +52,6 @@ button:disabled{opacity:.5;cursor:default}
 a{color:inherit}
 `))
 
-// ---- the static part: what this is and how to use it --------------------------------------------
 const intro = $('div', {},
   $('header', {}, $('img', { src: LOGO, width: 48, height: 48, alt: '' }), $('h1', {}, 'CORVAX')),
   $('p', {}, `A CORVAX peer${node.anchor === '1' ? ' that is publicly reachable, which makes it an anchor' : ''}: it helps peers find each other by key or by topic and open direct WebRTC connections. ` +
@@ -66,7 +65,6 @@ const intro = $('div', {},
   $('p', {}, 'Anchor list as plain text: ', $('code', {}, `curl -s ${node.origin}`), ' · ', $('a', { href: 'https://github.com/sloev/corvax' }, 'Source and spec'))
 )
 
-// ---- the live part ---------------------------------------------------------------------------
 const log = el => (...parts) => { el.append(parts.join(' ') + '\n'); el.scrollTop = el.scrollHeight }
 const status = $('span', { class: 'mute' }, 'Not connected. Going live creates a peer in this tab; its key, anchors and topics are kept in this browser.')
 const goLive = $('button', { class: 'primary', onclick: () => start() }, 'Go live')

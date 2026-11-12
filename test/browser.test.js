@@ -19,7 +19,7 @@ for (const name of browsers) {
     // each page gets its own context (own storage, own identity)
     const open = async () => {
       const page = await (await browser.newContext()).newPage()
-      page.on('pageerror', e => console.error(name, e.message)); if (process.env.DEBUG) page.on('console', m => console.error('page:', m.text()))
+      page.on('pageerror', e => console.error(name, e.message))
       await page.goto(origin + '/')
       const address = await page.evaluate(async () => {
         const { Peer } = await import('/cx/index.js')

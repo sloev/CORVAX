@@ -5,17 +5,17 @@
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { encode, decode } from './bencode.js'
-import { sign, verify, sha256, random } from './crypto.js'
+import { verify, sha256, random, hiOk } from './crypto.js'
 import { verifyBeacon } from './record.js'
-import { hex, utf8, str, concat, equal, z32 } from './bytes.js'
+import { hex, utf8, str, z32 } from './bytes.js'
 import { homepage } from './home.js'
+import { serve } from './store.js'
 
 const INBOX_TTL = 120e3, INBOX_MAX = 64, POLL_MAX = 25e3, BODY_MAX = 8192
 const COST = { put: 6, cx_check: 12, cx_tpub: 2, cx_send: 1, cx_tfind: 1, cx_listen: 0.5, cx_twatch: 0.5, get: 1, get_peers: 1 }
 const ids = (x, max) => Array.isArray(x) ? x.filter(b => b instanceof Uint8Array && b.length === 32).slice(0, max) : []
 const srcDir = new URL('./', import.meta.url), logoDir = new URL('../assets/logo/', import.meta.url)
 
-// ---- inboxes: short-lived queues of sealed messages, drained by long polls ---------------------
 export class Inboxes {
   constructor () { this.boxes = new Map() }
   #box (k) {
@@ -57,13 +57,10 @@ export class Inboxes {
   }
 }
 
-// ---- query handlers (UDP and HTTP) ------------------------------------------------------------
 export function installHandlers (node) {
   const h = node.dht.handlers
-  h.cx_hi = async a => {
-    if (!(a.n instanceof Uint8Array) || a.n.length > 64) throw [203, 'bad nonce']
-    return { k: node.id.pub, sig: await sign(node.id, concat(utf8('cx-hi'), a.n)), ...(node.line() && { line: node.line() }), ...(node.storing() && { st: 1 }) }
-  }
+  const ctx = () => ({ id: node.id, store: node.store, line: node.line(), stored: raw => node.peer?.topics.local(raw).catch(() => {}) })
+  for (const q of ['cx_hi', 'cx_tpub', 'cx_tfind']) h[q] = a => serve(ctx(), q, a)
   h.cx_anchors = async (a, from) => {
     if (a.me instanceof Uint8Array && a.me.length <= 255) node.book.add(str(a.me))
     return { a: node.listing() }
@@ -83,15 +80,6 @@ export function installHandlers (node) {
     if (!node.book.best(1000, 'native', e => e.verified && e.host === from.host).length) throw [201, 'only for known anchors']
     return probe(node, str(a.ip), a.port, a.hport, a.k)
   }
-  // Topic storage (only while this node is a reachable storage peer)
-  const storage = () => { if (!node.storing()) throw [204, 'storage disabled on this peer']; return node.store }
-  h.cx_tpub = async a => {
-    const st = storage(), recs = Array.isArray(a.r) ? a.r.filter(r => r instanceof Uint8Array && r.length <= 512).slice(0, 32) : []
-    const ok = []
-    for (const r of recs) { const s = await st.put(r); ok.push(utf8(s)); if (s === 'ok') node.peer?.topics.local(r).catch(() => {}) }
-    return { ok, now: Date.now() }
-  }
-  h.cx_tfind = async a => ({ r: storage().find(ids(a.t, 16)), now: Date.now() })
   h.cx_send = async a => {
     if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > 4096) throw [203, 'bad message']
     await node.inboxes.put(a.to, a.msg)
@@ -99,25 +87,19 @@ export function installHandlers (node) {
   }
 }
 
-async function probe (node, ip, port, hport, k) {
-  const out = { udp: 0, http: 0 }
-  const checkHi = async (r, n) => r && r.k instanceof Uint8Array && equal(r.k, k) && verify(r.k, r.sig, concat(utf8('cx-hi'), n))
-  if (port) {
-    const n = random(16)
-    out.udp = await checkHi(await node.dht.query({ host: ip, port }, 'cx_hi', { n }), n) ? 1 : 0
-  }
-  if (hport) {
-    const n = random(16)
-    try {
-      const host = ip.includes(':') ? `[${ip}]` : ip
-      const res = await fetch(`http://${host}:${hport}/krpc`, { method: 'POST', body: encode({ t: random(4), y: 'q', q: 'cx_hi', a: { n } }), signal: AbortSignal.timeout(4000) })
-      out.http = await checkHi(decode(new Uint8Array(await res.arrayBuffer())).r, n) ? 1 : 0
-    } catch {}
-  }
-  return out
+// One KRPC query over HTTP (used to probe peers that may not be our anchors).
+export async function post (url, q, a, timeout = 4000) {
+  const res = await fetch(`${url}/krpc`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: encode({ t: random(4), y: 'q', q, a }), signal: AbortSignal.timeout(timeout) })
+  return decode(new Uint8Array(await res.arrayBuffer())).r
 }
 
-// ---- HTTP -------------------------------------------------------------------------------------
+async function probe (node, ip, port, hport, k) {
+  const n = random(16), url = `http://${ip.includes(':') ? `[${ip}]` : ip}:${hport}`
+  const udp = port && await hiOk(await node.dht.query({ host: ip, port }, 'cx_hi', { n }), k, n)
+  const http = hport && await post(url, 'cx_hi', { n }).then(r => hiOk(r, k, n), () => false)
+  return { udp: udp ? 1 : 0, http: http ? 1 : 0 }
+}
+
 export function httpServer (node) {
   const buckets = new Map(), replays = new Map()
   const { burst, perSecond, polls: maxPolls } = { burst: 120, perSecond: 4, polls: 64, ...node.o?.rate }
