@@ -1,4 +1,4 @@
-// TopicStore: what a storage node keeps. Leased, signed provider records; no topic authority.
+// TopicStore: what a storage peer keeps. Leased, signed provider records; no topic authority.
 //   put(record)          validate → 'ok' | 'dup' | 'stale' | 'expired' | 'future' | 'full' | 'bad'
 //   find([ids])          live records (exp > now), newest first, ≤ 100 per topic
 //   watch([ids], cursor) snapshot or coalesced delta, long poll ≤ 25 s

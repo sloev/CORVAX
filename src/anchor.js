@@ -1,4 +1,5 @@
-// Anchor services (native only): the cx_* query handlers, the inboxes, and the HTTP server.
+// Peer services for native runtimes: the cx_* query handlers, inboxes, topic storage and the HTTP server.
+// Every native peer runs the same code; being publicly reachable (an anchor) only decides who can use it.
 //   HTTP  GET /  homepage + anchor list · POST /krpc · GET /cx/*.js (library, app.js) · GET /favicon.ico
 // Anchors are trusted with nothing: records are signed and messages end-to-end encrypted.
 import { createServer } from 'node:http'
@@ -82,8 +83,8 @@ export function installHandlers (node) {
     if (!node.book.best(1000, 'native', e => e.verified && e.host === from.host).length) throw [201, 'only for known anchors']
     return probe(node, str(a.ip), a.port, a.hport, a.k)
   }
-  // Topic storage (only while this node is a reachable storage node)
-  const storage = () => { if (!node.storing()) throw [204, 'not a storage node']; return node.store }
+  // Topic storage (only while this node is a reachable storage peer)
+  const storage = () => { if (!node.storing()) throw [204, 'storage disabled on this peer']; return node.store }
   h.cx_tpub = async a => {
     const st = storage(), recs = Array.isArray(a.r) ? a.r.filter(r => r instanceof Uint8Array && r.length <= 512).slice(0, 32) : []
     const ok = []
@@ -173,7 +174,7 @@ export function httpServer (node) {
         .map(p => Uint8Array.of(...p.host.split('.').map(Number), p.port >> 8, p.port & 255)) }
     }
     if (q === 'cx_twatch') {
-      if (!node.storing()) throw [204, 'not a storage node']
+      if (!node.storing()) throw [204, 'storage disabled on this peer']
       const t = ids(a.t, 64)
       if (!t.length) throw [203, 'no topics']
       const open = polls.get(from.host) || 0

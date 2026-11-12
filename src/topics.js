@@ -1,7 +1,7 @@
-// Peer side of topics: presence (leased provider records on storage nodes) and best-effort broadcast.
-//   publish/renew/unpublish  → the 5 XOR-closest storage nodes, batched, one timer, ±20 % jitter
+// Peer side of topics: presence (leased provider records on storage peers) and best-effort broadcast.
+//   publish/renew/unpublish  → the 5 XOR-closest storage peers, batched, one timer, ±20 % jitter
 //   search                   → cx_tfind on the 8 closest; every record is verified here (storage is untrusted)
-//   subscribe                → one multiplexed cx_twatch long poll per storage node + topic neighbours
+//   subscribe                → one multiplexed cx_twatch long poll per storage peer + topic neighbours
 //   broadcast                → signed frame to ≤ 4 neighbours; receivers verify, dedup, rate-limit, forward to ≤ 3
 import { topicId, normalize, makeRecord, readRecord, makeFrame, encodeFrame, checkFrame, LIMITS } from './topic.js'
 import { hex, z32, unz32, utf8, str, xor, compare } from './bytes.js'
@@ -20,8 +20,8 @@ export class Topics {
     this.L = { ...LIMITS, ...limits }
     this.handles = new Map()      // hex(topic id) -> Topic
     this.skews = []               // recent samples of (storage clock − local clock)
-    this.down = new Map()         // storage node key -> until (skipped while down)
-    this.polls = new Map()        // storage node key -> { ac, topics: Set(hex) }
+    this.down = new Map()         // storage peer key -> until (skipped while down)
+    this.polls = new Map()        // storage peer key -> { ac, topics: Set(hex) }
     this.links = new Map()        // `${tid}|${address}` -> { address, tid, channel, kind }
     this.reserved = new Map()     // `${tid}|${address}` -> { until, out } (out = our own attempt)
     this.failed = new Map()       // `${tid}|${address}` -> time of last failed link attempt
@@ -56,7 +56,7 @@ export class Topics {
     return this.handles.get(h)
   }
 
-  // The n XOR-closest verified storage nodes we can reach, skipping ones that recently failed.
+  // The n XOR-closest verified storage peers we can reach, skipping ones that recently failed.
   nodes (id, n) {
     const now = Date.now()
     return this.peer.book.best(1000, 'native', e => e.verified && e.storage && this.peer.urlOf(e) && !(this.down.get(e.key) > now))
@@ -141,7 +141,7 @@ export class Topics {
       .map(([address, p]) => ({ address, presence: 'recent', expires: p.exp - this.skew(), seq: p.seq }))
   }
 
-  // Recompute which storage nodes watch which topics; one long poll per node.
+  // Recompute which storage peers watch which topics; one long poll per node.
   rewatch () {
     clearTimeout(this.rewatchTimer)
     this.rewatchTimer = unref(setTimeout(() => this.#rewatch(), 20))
@@ -343,7 +343,7 @@ export class Topic {
     await this.topics.ensureBeacon().catch(() => {})
     const stored = (await this.topics.publishNow([this])).get(this) || 0
     this.topics.schedule()
-    if (!stored) throw err('no-storage', 'no storage node accepted the record')
+    if (!stored) throw err('no-storage', 'no storage peer accepted the record')
     return { stored }
   }
   async unpublish () {

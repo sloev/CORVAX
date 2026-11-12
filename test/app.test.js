@@ -42,7 +42,7 @@ test(`homepage app (${name}): renders, goes live, topics and messages between tw
     await topicCard(p).getByLabel('Topic, e.g. chess').fill('Chess')
     await topicCard(p).getByRole('button', { name: 'Subscribe' }).click()
     await topicCard(p).getByRole('button', { name: 'Publish' }).click()
-    await topicCard(p).locator('.log').getByText(/published "chess" on 1 storage node/).waitFor({ timeout: 10000 })
+    await topicCard(p).locator('.log').getByText(/published "chess" on 1 storage peer/).waitFor({ timeout: 10000 })
   }
   await topicCard(B.page).getByRole('button', { name: 'Search' }).click()
   await topicCard(B.page).locator('.log').getByText(addrA).waitFor({ timeout: 10000 })

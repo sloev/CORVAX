@@ -1,4 +1,4 @@
-// Topic presence against 6 real storage nodes (anchors), with Node peers.
+// Topic presence against 6 real storage peers (anchors), with Node peers.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { anchors, until } from './helpers.js'
@@ -19,7 +19,7 @@ const live = async (name, address) => {
 test.before(async () => { nodes = await anchors(6); lines = nodes.map(n => n.line()) })
 test.after(async () => { for (const p of peers) await p.close(); for (const n of nodes) await n.close().catch(() => {}) })
 
-test('publish replicates to exactly the 5 XOR-closest storage nodes; search finds the provider', async () => {
+test('publish replicates to exactly the 5 XOR-closest storage peers; search finds the provider', async () => {
   const a = await peer(), b = await peer()
   const t = await a.topic('Chess')
   const { stored } = await t.publish()
@@ -60,7 +60,7 @@ test('offline provider (no renewals, no tombstone) expires', async () => {
   assert.equal((await (await w.topic('poker')).search()).length, 0)
 })
 
-test('a failed storage node is replaced on renewal; search still works meanwhile', async () => {
+test('a failed storage peer is replaced on renewal; search still works meanwhile', async () => {
   const a = await peer(), b = await peer()
   await (await a.topic('backgammon')).publish()
   const before = await holders('backgammon')
@@ -81,7 +81,7 @@ test('clock skew: a provider 5 minutes ahead corrects itself from the storage cl
   assert.equal((await (await b.topic('skewed')).search())[0]?.presence, 'recent')
 })
 
-test('one long poll per storage node for many topics; lost cursor → snapshot resync; close cleans up', async () => {
+test('one long poll per storage peer for many topics; lost cursor → snapshot resync; close cleans up', async () => {
   const w = await peer(), a = await peer()
   const seen = []
   for (const name of ['t1', 't2', 't3', 't4']) (await w.topic(name)).subscribe({ presence: e => seen.push([name, e.presence]) })

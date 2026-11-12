@@ -101,3 +101,29 @@ test('homepage: tiny shell + app.js for browsers, plain anchor list for everythi
   const ico = await fetch(base + '/favicon.ico')
   assert.equal(ico.headers.get('content-type'), 'image/x-icon')
 })
+
+test('one peer protocol: a non-anchor native peer serves storage the same way; losing one inbox anchor loses nothing', async t => {
+  const [a1, a2] = await anchors(2)
+  const local = await node({ anchor: 'off', anchors: [a1.line()] })                 // not publicly reachable
+  t.after(async () => { await local.close(); await a1.close().catch(() => {}); await a2.close().catch(() => {}) })
+  assert.equal(local.isAnchor, false)
+  const { identity } = await import('../src/crypto.js'), { makeRecord, topicId } = await import('../src/topic.js')
+  const hi = await rpc(local, 'cx_hi', { n: random(16) })
+  assert.equal(hi.r.st, 1, 'advertises storage like any peer')
+  const id = await identity(), t1 = await topicId('uniform')
+  const put = await rpc(local, 'cx_tpub', { r: [await makeRecord(id, t1, 1, Date.now() + 600e3)] })
+  assert.equal(str(put.r.ok[0]), 'ok')
+  assert.equal((await rpc(local, 'cx_tfind', { t: [t1] })).r.r.length, 1)
+
+  // a peer whose inboxes are on two anchors keeps receiving when one of them goes down
+  const A = await Peer.create({ anchors: [a1.line(), a2.line()], allowPrivate: true, RTCPeerConnection: null })
+  const B = await Peer.create({ anchors: [a1.line(), a2.line()], allowPrivate: true, RTCPeerConnection: null })
+  t.after(() => { A.close(); B.close() })
+  assert.equal(A.inboxes.length, 2)
+  await A.publish()
+  const got = []
+  A.on(m => got.push(m.body))
+  await (A.inboxes[0].entry.key === a1.key ? a1 : a2).close()                       // its first inbox anchor disappears
+  await B.send(A.address, 'still here')
+  await until(() => got.includes('still here'), 10000)
+})

@@ -34,7 +34,7 @@ export class CorvaxNode {
     this.port = this.o.port
     this.host = this.o.host
     this.web = this.o.web || null
-    this.isAnchor = false
+    this.isAnchor = false        // = publicly reachable (verified by a stranger). The only thing that makes a peer an anchor.
     this.publicHost = this.o.publicHost || null
     this.inboxes = new Inboxes()
     this.store = this.o.storage ? new TopicStore(this.o.store) : null
@@ -47,8 +47,9 @@ export class CorvaxNode {
     const own = this.line(), rest = this.book.shared().split('\n').filter(l => l && !l.startsWith(`corvax-anchor:${this.key}@`))
     return [own, ...rest].filter(Boolean).join('\n')
   }
-  services () { return this.isAnchor ? ['udp', 'http', ...(this.storing() ? ['storage'] : []), ...(this.peer?.RTC && this.peer.relayFor ? ['relay'] : [])] : ['http (local)'] }
-  storing () { return !!(this.isAnchor && this.store) }
+  // Capabilities are the same for every peer; reachability only decides who can use them.
+  services () { return ['udp', 'http', ...(this.storing() ? ['storage'] : []), ...(this.peer?.RTC && this.peer.relayFor ? ['relay'] : [])] }
+  storing () { return !!this.store }
 
   async start () {
     const o = this.o, log = o.log

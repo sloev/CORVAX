@@ -75,7 +75,7 @@ export class Peer {
   }
 
   // Pull anchor lists from our anchors and verify what is new, so every peer converges on the same
-  // set of anchors and storage nodes (topic records go to the closest ones in *our* book).
+  // set of anchors and storage peers (topic records go to the closest ones in *our* book).
   async refresh () {
     await Promise.allSettled(this.inboxes.map(ib => this.rpc(ib.url, 'cx_anchors', {}).then(r => this.book.add(str(r.a)))))
     await this.verify(16)

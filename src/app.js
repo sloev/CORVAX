@@ -55,8 +55,8 @@ a{color:inherit}
 // ---- the static part: what this is and how to use it --------------------------------------------
 const intro = $('div', {},
   $('header', {}, $('img', { src: LOGO, width: 48, height: 48, alt: '' }), $('h1', {}, 'CORVAX')),
-  $('p', {}, `A CORVAX ${node.anchor === '1' ? 'anchor' : 'node'}: it helps peers find each other by key or by topic and open direct WebRTC connections. ` +
-    'It stores nothing but signed address records, leased topic records and short-lived encrypted messages.'),
+  $('p', {}, `A CORVAX peer${node.anchor === '1' ? ' that is publicly reachable, which makes it an anchor' : ''}: it helps peers find each other by key or by topic and open direct WebRTC connections. ` +
+    'It stores nothing but signed address records, leased topic records and short-lived encrypted messages. Every CORVAX peer speaks the same protocol; anchors are simply the ones others can reach, and their operators aim to keep them online.'),
   $('h2', {}, 'This node'),
   $('pre', {}, node.line),
   $('p', { class: 'mute' }, `Services: ${(node.services || 'none').split(',').join(', ')} · up ${since(+node.uptime || 0)}`),
@@ -164,7 +164,7 @@ function topics () {
   const pub = $('button', { onclick: run(async () => {
     const t = await topic()
     if (t.published) { await t.unpublish(); remember(t, { pub: false }); return say(`unpublished "${t.name}"`) }
-    const { stored } = await t.publish(); remember(t, { pub: true }); say(`published "${t.name}" on ${stored} storage node(s)`)
+    const { stored } = await t.publish(); remember(t, { pub: true }); say(`published "${t.name}" on ${stored} storage peer(s)`)
   }) }, 'Publish')
   const sub = $('button', { onclick: run(async () => {
     const t = await topic()

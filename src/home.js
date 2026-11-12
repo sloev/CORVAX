@@ -4,6 +4,7 @@
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
 
 export function homepage ({ origin, line, anchor, services = [], uptime = 0, anchors = '' }) {
+  // `anchor` = this peer is publicly reachable; every peer serves the same protocol
   return `<!doctype html>
 <html lang="en">
 <meta charset="utf-8">

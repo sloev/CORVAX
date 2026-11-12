@@ -7,7 +7,7 @@ The connection is direct when possible; otherwise it is relayed through another 
 
 - **One permanent address per peer:** its Ed25519 public key (52 characters). Nothing to register, and it never expires.
 - **No central server:** anchors are ordinary nodes that anyone can run. They are trusted with nothing, because records are signed and messages are sealed.
-- **Topics:** publish presence for a topic and find the others there. Presence is a signed lease held on several storage nodes, not a central list. Topics also carry short best-effort broadcasts, passed peer to peer.
+- **Topics:** publish presence for a topic and find the others there. Presence is a signed lease held on several storage peers, not a central list. Topics also carry short best-effort broadcasts, passed peer to peer.
 - **Discovery over everything:**
   - the BitTorrent Mainline DHT (records are pkarr-compatible)
   - DNS TXT records

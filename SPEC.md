@@ -8,6 +8,14 @@ Notation: `‖` is byte concatenation. `z32` is z-base32 (alphabet `ybndrfg8ejkm
 
 ---
 
+## 0. Peers and anchors
+
+There is one kind of peer. Every peer speaks the whole protocol and MAY store, serve, relay and broadcast.
+
+An **anchor** is a peer with an independently reachable public endpoint (UDP and HTTP, verified by a stranger through `cx_check`) whose operator is expected to keep it online. That expectation is operational, not a protocol guarantee: the network tolerates anchor outages and depends on no single anchor.
+
+Anchors have no authority over identities, topic membership or records. Everything they hold is signed by its owner and verified by its readers. Anchor lines (§3.2) list reachable peers; "storage peer" means any peer answering `cx_tpub`/`cx_tfind`/`cx_twatch`.
+
 ## 1. Standards this builds on
 
 | Standard | Used for |
@@ -97,7 +105,7 @@ Error codes: 201 generic · 202 rate limited · 203 protocol · 204 unknown meth
 | `ping`, `find_node` | BEP 5 | |
 | `get_peers`, `announce_peer` | BEP 5 | anchor directory: info_hash = `SHA1("corvax anchors v1")` |
 | `get`, `put` | BEP 44 | Beacons |
-| `cx_hi` | `{n: ≤64 bytes}` → `{k: ed_pub, sig, line?, st?}` | `sig = Ed25519("cx-hi" ‖ n)`. Proves identity only. `st: 1` = storage node (§10) |
+| `cx_hi` | `{n: ≤64 bytes}` → `{k: ed_pub, sig, line?, st?}` | `sig = Ed25519("cx-hi" ‖ n)`. Proves identity only. `st: 1` = storage peer (§10) |
 | `cx_anchors` | `{me?: anchor line}` → `{a: text}` | `a` is the responder's own line plus its best 32 and 8 random lines, newline-separated. `me` introduces the caller |
 | `cx_check` | `{k, port?, hport?}` → `{udp, http, ip, by}` | "can strangers reach me?" The anchor asks a *different* anchor (`cx_probe`) when it can; `by` is that anchor's key or `"self"`. `ip` is the caller's address as seen |
 | `cx_probe` | `{ip, port, hport, k}` → `{udp, http}` | anchor-to-anchor only (callers must be verified anchors). Sends `cx_hi` to `ip:port` over UDP and to `http://ip:hport` |
@@ -226,16 +234,16 @@ record = bencode { t, k, seq, exp, sig },   sig = Ed25519("cx-topic" ‖ fields)
   - if `c` is missing, from another epoch, newer than the head, or older than the log, the reply is `{snap: 1, r: live records for t, c: head}`
   - otherwise it returns the newest record per (t, k) among events after `c` for those topics
   - when there are none yet, it waits up to 25 s, and after the first matching event 2 s more (coalescing); the reply is `{r, c: head}`
-- **Every topic reply carries `now`**, the storage node's clock in ms.
+- **Every topic reply carries `now`**, the storage peer's clock in ms.
 
 ### 10.4 Peers
 - **Replicas:**
-  - a provider sends its record to the 5 verified storage nodes (`st: 1`) in its anchor book with the smallest `ed_pub XOR topic id`, trying up to 8 when some fail
-  - it renews every 5 min ± 20 % jitter, batched per storage node
+  - a provider sends its record to the 5 verified storage peers (`st: 1`) in its anchor book with the smallest `ed_pub XOR topic id`, trying up to 8 when some fail
+  - it renews every 5 min ± 20 % jitter, batched per storage peer
   - `exp = now + skew + LEASE`, where `skew` = median of (storage `now` − local midpoint) over the last 8 replies; a `future`/`expired` status triggers one retry with the corrected skew
 - **Searching and watching:**
-  - searchers query the 8 closest storage nodes and verify every record themselves
-  - watchers run one `cx_twatch` per storage node covering all their topics assigned to that node (its 5 closest)
+  - searchers query the 8 closest storage peers and verify every record themselves
+  - watchers run one `cx_twatch` per storage peer covering all their topics assigned to that node (its 5 closest)
 - **Neighbour links:**
   - a topic member keeps at most 4 links per topic and 16 in total, opened with `p: "topic"` to `recent` providers (direct, or relayed via `via?` when direct fails)
   - a peer accepts a topic offer only if it is subscribed and below both limits, otherwise it answers `busy`

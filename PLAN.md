@@ -21,17 +21,42 @@ CORVAX does seven things and then gets out of the way:
 
 The protocol ends at open DataChannels, presence results and delivered broadcasts. What peers do with them is up to them.
 
-### Roles (independent capabilities)
+### Peers and anchors
 
-| Role | Who | Does |
-|---|---|---|
-| **Provider** | any peer, including NATed and browser peers | publishes leased presence for the topics it takes part in |
-| **Searcher** | any peer | searches and watches topics |
-| **Storage node** | a publicly reachable native node (in practice every anchor, unless started with `--no-storage`) | stores and serves leased topic records it is sent; validates them; **not a topic authority** |
-| **Anchor** | a native node with verified public UDP and HTTP | bootstrap, DHT, inboxes, STUN, homepage, anchor book |
-| **Relay** | any peer with WebRTC, within its limits | bridges two DataChannels when no direct path exists |
+**There is one kind of CORVAX peer.** An anchor is not a separate node type, identity or protocol role.
 
-Offline peers can't renew leases or answer. **An unexpired lease is evidence of a recent publication, never proof that the peer is online now.**
+**Every peer MAY** (whenever its runtime and reachability allow it):
+- publish, discover, subscribe to and unsubscribe from topics
+- publish signed, leased provider records
+- store, validate and serve provider records (`cx_tpub`/`cx_tfind`/`cx_twatch`) and answer discovery queries with incremental updates
+- broadcast and forward signed, short-lived topic messages
+- open WebRTC connections and relay for other peers
+- take part in rendezvous (inboxes, `cx_anchors`, the DHT) and peer discovery
+
+**An anchor is a peer with:**
+1. an independently reachable public endpoint (UDP and HTTP, verified by a stranger through `cx_check`), and
+2. an operational expectation of high availability: anchors SHOULD run continuously and keep downtime short.
+
+That is the only distinction. In practice, others can only *use* the services of peers they can reach, so storage, inboxes and the DHT end up on anchors. That's a consequence of reachability, not a rule.
+- A NATed native peer runs exactly the same handlers; peers on its LAN can use them.
+- Browsers can't accept inbound HTTP, so they only use those services.
+
+**Rules:**
+- **Availability:** this is an operational expectation, not a protocol guarantee. The network MUST tolerate anchor outages and MUST NOT depend on any single anchor.
+  - every peer keeps 2 inbox anchors
+  - topic records live on 5 storage peers, and searches ask 8
+  - Beacons live in the DHT
+  - bootstrap uses many independent sources
+  - the anchor book scores availability over time, so long-running anchors rank higher and dead ones decay
+- **No anchor-only machinery:** no anchor-only topic indexes, storage protocols, subscription registries or broadcast infrastructure. All peers use the same message formats, validation and security rules.
+- **No authority:** anchors have no authority over identity, topic membership or provider records. Everything they hold is signed by its owner and verified by whoever reads it.
+- **Dynamic:** reachability and connections are dynamic. A node checks its reachability at start and every 30 min, and becomes or stops being an anchor accordingly.
+
+"Storage peer" below means any peer answering the storage queries; publishers pick from the reachable ones that advertise `st: 1` in `cx_hi`.
+
+**Implementation principle: one uniform peer protocol. Public reachability and expected uptime distinguish anchors; nothing else does.**
+
+**Offline peers can't renew leases or answer. An unexpired lease is evidence of a recent publication, never proof that the peer is online now.**
 
 ### Out of scope, permanently
 - Anything on top of a DataChannel (framing, RPC, files, media)
@@ -67,7 +92,7 @@ Offline peers can't renew leases or answer. **An unexpired lease is evidence of 
 
 ```
           UDP (KRPC · STUN)                            HTTP POST /krpc
- Mainline ◄───────────────► ANCHOR + STORAGE ◄─────────────────────── any client
+ Mainline ◄───────────────► ANCHOR (a reachable peer) ◄─────────────────────── any client
  DHT nodes                     ▲ ▲                                   (browser, Node, Bun, Deno, curl)
                      UDP KRPC  │ │ LAN: broadcast "CX?" + mDNS
                       ANCHOR ◄─┘ └─► native nodes on the same network
@@ -76,13 +101,13 @@ Offline peers can't renew leases or answer. **An unexpired lease is evidence of 
  PEER A ◄════ RTCDataChannel ════► PEER C (any peer) ◄════ RTCDataChannel ════► PEER B
         └──────────── end-to-end encrypted relayed channel (fallback) ───────────┘
 
- topic "chess":  provider records ──► 5 closest storage nodes ◄── search / watch (one long poll per node)
+ topic "chess":  provider records ──► 5 closest storage peers ◄── search / watch (one long poll per node)
                  broadcast:  A ──► ≤ 4 topic neighbours ──► each forwards to ≤ 3 more, ≤ 4 hops
 ```
 
 **Two transports, one message format (bencoded KRPC):**
 - **UDP:** node ↔ node, Mainline, STUN, LAN discovery.
-- **HTTP `POST /krpc`:** every client ↔ anchor/storage node. Browsers need an HTTPS origin (`web=`, e.g. a Cloudflare tunnel, which carries HTTP only). Natives may use `http://ip:port`.
+- **HTTP `POST /krpc`:** every client ↔ a reachable peer (anchor). Browsers need an HTTPS origin (`web=`, e.g. a Cloudflare tunnel, which carries HTTP only). Natives may use `http://ip:port`.
 
 Topic broadcasts travel only over WebRTC DataChannels between peers.
 
@@ -114,7 +139,7 @@ Messages are accepted only if they decrypt, the signature verifies, `to` is the 
 | `ping`, `find_node` | BEP 5 | routing |
 | `get_peers`, `announce_peer` | BEP 5 | **anchor directory only**: infohash `SHA1("corvax anchors v1")`. Results are verified like any other anchor line |
 | `get`, `put` | BEP 44 | resolve / publish a Beacon. Recursive over HTTP |
-| `cx_hi {n}` | ours | → `{k, sig = Ed25519("cx-hi" ‖ n), line?, st?}`; `st: 1` = this node is a storage node |
+| `cx_hi {n}` | ours | → `{k, sig = Ed25519("cx-hi" ‖ n), line?, st?}`; `st: 1` = this node is a storage peer |
 | `cx_anchors {me?}` | ours | → `{a}`: own line + best 32 + 8 random anchor lines |
 | `cx_check {k, port, hport}` | ours | asks a *different* anchor (`cx_probe`) whether strangers reach the caller → `{udp, http, ip, by}` |
 | `cx_probe {ip, port, hport, k}` | ours | anchor ↔ anchor only |
@@ -169,7 +194,7 @@ Messages are accepted only if they decrypt, the signature verifies, `to` is the 
 - DNS TXT `_corvax-anchors.<domain>` (browsers via public DoH JSON)
 - natives only: Mainline `get_peers` on the anchor topic; LAN `CX?` on UDP 4798 and mDNS `_corvax._udp.local`
 
-**Automatic promotion:** native nodes call `cx_check` at start and every 30 min. When UDP and HTTP are reachable from a stranger, the node becomes an anchor (DHT server mode, STUN, `announce_peer`) and, unless `--no-storage`, a storage node. `--no-anchor` opts out.
+**Reachability check:** native peers call `cx_check` at start and every 30 min. When UDP and HTTP are reachable from a stranger, the peer is an anchor: its line is published in anchor books, it serves the DHT (not read-only), and it does `announce_peer`. Every native peer serves the same queries (storage unless `--no-storage`) regardless; `--no-anchor` opts out of being listed.
 
 ---
 
@@ -202,7 +227,7 @@ Errors: `not-found | no-answer | ice-failed | busy | no-relay | timeout | no-web
 normalize(name) = NFKC → trim → collapse whitespace to " " → lowercase;  1–200 bytes UTF-8 after normalization
 topic id        = SHA-256("cx/topic:" ‖ normalize(name))                     32 bytes
 ```
-Topics belong to nobody. Storage nodes see only ids, never names. Ids are not secret: anyone who guesses a name can compute its id.
+Topics belong to nobody. Storage peers see only ids, never names. Ids are not secret: anyone who guesses a name can compute its id.
 
 ### 8.2 Provider record
 ```
@@ -213,7 +238,7 @@ record  = bencode { t, k, seq, exp, sig }      sig = Ed25519("cx-topic" ‖ fiel
 - **`exp`:** absolute expiry, `now + skew + LEASE`, with `LEASE` = 10 min.
 - **Tombstone (unpublish):** a record with a higher `seq` and `exp ≤ now`.
 
-### 8.3 Storage node rules (`TopicStore`)
+### 8.3 Storage rules (`TopicStore`, any peer)
 On every `cx_tpub` record, in order:
 
 | Check | Result |
@@ -244,15 +269,15 @@ On every `cx_tpub` record, in order:
 `now` (the node's clock) is in every topic reply.
 
 ### 8.4 Provider side (publish, renew, unpublish)
-- **Storage choice:** the 5 verified storage nodes in our own book whose key is XOR-closest to the topic id ("closest suitable"). If one fails, the next closest is tried, up to 8 in total.
+- **Storage choice:** the 5 verified, reachable storage peers (`st: 1`) in our own book whose key is XOR-closest to the topic id ("closest suitable"). If one fails, the next closest is tried, up to 8 in total.
 - **Publish:** sign a record and send it to those nodes. It succeeds if at least one accepts, and reports how many did.
-- **Renew:** **one timer** for all published topics, every 5 min ± 20 % jitter. Records are **batched per storage node** (≤ 32 per `cx_tpub`), and every renewal recomputes the closest set, so a failed node is replaced automatically.
+- **Renew:** **one timer** for all published topics, every 5 min ± 20 % jitter. Records are **batched per storage peer** (≤ 32 per `cx_tpub`), and every renewal recomputes the closest set, so a failed node is replaced automatically.
 - **Clock skew:** the peer keeps `skew` = median of (storage `now` − local time at reply) over the last 8 topic replies. `exp` uses `now + skew`. A `future` or `expired` status triggers one immediate retry with the updated skew.
 - **Unpublish:** send a tombstone to the same nodes and stop renewing.
 
 ### 8.5 Searcher side (search, watch)
-- **Search:** `cx_tfind` on the 8 closest storage nodes. The searcher verifies every record itself (storage is untrusted), keeps the highest `seq` per provider, and drops records that aren't live. Each result: `{ address, presence: 'recent', expires, seq }`.
-- **Watch:** for all watched topics, compute each topic's 5 closest storage nodes, group the topics by node, and run **one multiplexed long poll per storage node** (`cx_twatch` with all of that node's topics, ≤ 64). A change to the watched set restarts the polls with a snapshot.
+- **Search:** `cx_tfind` on the 8 closest storage peers. The searcher verifies every record itself (storage is untrusted), keeps the highest `seq` per provider, and drops records that aren't live. Each result: `{ address, presence: 'recent', expires, seq }`.
+- **Watch:** for all watched topics, compute each topic's 5 closest storage peers, group the topics by node, and run **one multiplexed long poll per storage peer** (`cx_twatch` with all of that node's topics, ≤ 64). A change to the watched set restarts the polls with a snapshot.
   - Records from any node are verified, then merged by `seq`.
   - **Presence:** `recent` while `exp > now + skew`, otherwise `expired`. A local check every 5 s turns leases that ran out into `expired`.
   - **Events** are emitted only on transitions: new provider `recent`, renewed-after-expiry `recent`, tombstone or lapsed `expired`.
@@ -308,7 +333,7 @@ sig    = Ed25519("cx-tb" ‖ signed)          (hop is not signed: forwarders dec
 | Records | Beacon ≤ 1000 B; message ≤ 4 KB; provider record ~170 B; broadcast body ≤ 1024 B |
 | HTTP per IP | token bucket, burst 120, 4/s; costs `put` 6, `cx_check` 12, `cx_tpub` 2, `cx_send` 1, `get`/`get_peers`/`cx_tfind` 1, others 0.5; ≤ 64 open long polls; body ≤ 8 KB |
 | DHT | tokens = SHA1(secret ‖ window ‖ ip), 10-minute windows; routing table ≤ 1000 |
-| Topics | lease 10 min; renew 5 min ± 20 %; ≤ 32 records per `cx_tpub`, ≤ 16 ids per `cx_tfind`, ≤ 64 per `cx_twatch`; long poll 25 s; coalesce 2 s; ≤ 64 topics per provider and ≤ 50 000 records per storage node; ≤ 100 providers per topic per reply; event log ≤ 10 000 / 30 min |
+| Topics | lease 10 min; renew 5 min ± 20 %; ≤ 32 records per `cx_tpub`, ≤ 16 ids per `cx_tfind`, ≤ 64 per `cx_twatch`; long poll 25 s; coalesce 2 s; ≤ 64 topics per provider and ≤ 50 000 records per storage peer; ≤ 100 providers per topic per reply; event log ≤ 10 000 / 30 min |
 | Broadcast | ≤ 4 neighbours per topic, ≤ 16 links per peer, forward to ≤ 3, hop limit 4, age ≤ 2 min, 10 per sender per topic per minute, duplicate cache 10 min (≤ 10 000 ids) |
 | Relaying | browsers ≤ 2 sessions at 256 kbit/s, natives ≤ 16 at 2 Mbit/s; ≤ 1 GB per hour; idle 2 min |
 
@@ -385,7 +410,7 @@ Publishing or subscribing to a topic also publishes the peer's Beacon if it hasn
 
 1. `topic.js`: normalization, ids, records, frames, with signature checks → unit tests
 2. `store.js` + `cx_tpub`/`cx_tfind`/`cx_twatch` handlers + `st` in `cx_hi` + book `storage` flag → store tests
-3. `topics.js` publish/renew (batched, jitter, skew, fallback nodes)/unpublish/search → integration tests against 6 storage nodes
+3. `topics.js` publish/renew (batched, jitter, skew, fallback nodes)/unpublish/search → integration tests against 6 storage peers
 4. Multiplexed watch, coalescing, snapshot resync, local expiry → watch tests
 5. `p: 'topic'` connections (`busy`, reservations), neighbour selection, broadcast send/verify/forward/rate/dedup → mesh and adversarial tests
 6. API integration and `close()` cleanup → resource tests; browser test
@@ -407,7 +432,7 @@ Publishing or subscribing to a topic also publishes the peer's Beacon if it hasn
 | `app` | the homepage as a person uses it: inlined logo, anchors, Go live in two tabs, topic publish/search/subscribe, presence, broadcast between tabs, a message; no page errors |
 | `topic` (unit) | normalization; id stability; record and frame tamper; wrong-topic record; oversize |
 | `store` (unit, fake clock) | ok/dup/stale/bad/expired/future; tombstone blocks replay; expiry and sweep; limits; find returns only live; watch: snapshot without cursor, delta with cursor, coalescing window, epoch change and trimmed log → snapshot, timeout, abort |
-| `topics` (integration, 6 storage nodes, Node peers) | replication to exactly the 5 closest; search finds providers; renewal keeps a provider recent past one lease; offline provider expires; unpublish → `expired` event; storage node killed → search still works and renewal re-replicates; clock skew corrected; cursor loss → snapshot; one long poll per node for many topics; `close()` leaves no timers or polls |
+| `topics` (integration, 6 storage peers, Node peers) | replication to exactly the 5 closest; search finds providers; renewal keeps a provider recent past one lease; offline provider expires; unpublish → `expired` event; storage peer killed → search still works and renewal re-replicates; clock skew corrected; cursor loss → snapshot; one long poll per node for many topics; `close()` leaves no timers or polls |
 | `broadcast` (unit with fake links + integration mesh) | delivery across a 5-peer mesh, exactly once per peer; loops suppressed; hop limit; forward fan-out ≤ 3; rate limit; oversize; old, future-dated and replayed frames; forged signature; sender without a live record; record for another topic |
 | `live` (manual) | pkarr relay; public DoH |
 
@@ -421,8 +446,8 @@ Publishing or subscribing to a topic also publishes the peer's Beacon if it hasn
 | Full SDP offer/answer | Robust across browsers and native libraries |
 | Relay through any peer by default; no TURN | Connections succeed whenever any path exists; no relay servers |
 | HTTP POST + long polls, no WebSocket | One client transport for every runtime |
-| **Topics use CORVAX provider records on storage nodes, not BEP 5** | BEP 5 announces IP:port without identity, signatures or expiry control, and spams the public DHT with private data. Our records are signed, leased and revocable |
-| **Publisher-driven replication to the 5 XOR-closest storage nodes** | No storage-to-storage protocol. Books differ slightly between peers, so searchers query 8 to absorb that |
+| **Topics use CORVAX provider records on storage peers, not BEP 5** | BEP 5 announces IP:port without identity, signatures or expiry control, and spams the public DHT with private data. Our records are signed, leased and revocable |
+| **Publisher-driven replication to the 5 XOR-closest storage peers** | No storage-to-storage protocol. Books differ slightly between peers, so searchers query 8 to absorb that |
 | **Absolute `exp` + tombstones + skew estimate** | A replayed old record can't revive a provider. Clock offsets are corrected from storage `now` instead of being trusted |
 | **Presence is only `recent` / `expired`** | A lease proves a recent publication, not that the peer is online |
 | **Eligibility = the sender's own live provider record inside the frame** | Receivers verify membership without any lookup or central list |
