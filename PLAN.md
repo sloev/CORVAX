@@ -50,6 +50,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 - [x] **Releases:** every green push to `main` is `v0.1.<run>`: minified ESM bundle (~50 KB, 18 KB gzipped) published to npm as `@sloev/corvax`, GitHub release with bundle and tarball, `latest` tag moved, 10 newest kept. One way to load it everywhere: `cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js` in browsers, `npm i corvax` elsewhere
 - [x] **Helpers:** `presence(onCount)` (a live visitor counter in one call) and `room(name, onMessage)` (topic chat), in `src/kit.js`
 - [x] **Live presence counter:** the homepage counts its viewers on topic `corvax-worker-home`: per-tab key (a reload is the same visitor), 2-min lease, pre-signed withdrawal sent on hide/close, live via one watch poll, no Beacon, inbox or WebRTC links
+- [x] **Community anchors:** "Add an anchor" issue form → live `cx_hi` check commented on the issue → a maintainer's `accepted` label appends it to `anchors.txt`; each release bakes the lines that answer into `src/anchors.js`
 - [x] **Public anchor** `https://corvax.sloev.workers.dev` (Cloudflare Worker, `worker/`): `test/worker-check.js` passes live; topic records persist in SQLite across evictions; zero-config peers bootstrap from it; its Beacons reach Mainline via the pkarr relay
 - [ ] Firefox and WebKit (CI, run by hand), real Safari
 - [ ] Two browsers on two real networks

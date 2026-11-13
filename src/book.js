@@ -33,10 +33,10 @@ export function isPublic (host) {
   if (host.includes(':')) return !/^(::1?$|f[cd]|fe[89ab]|ff|2001:db8)/i.test(host)
   const p = host.split('.').map(Number)
   if (p.length !== 4) return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(host)    // a DNS name
-  const [a, b] = p
+  const [a, b, c] = p, ab = `${a}.${b}`, abc = `${ab}.${c}`
   return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b < 128) ||
-    (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168) ||
-    (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19 || b === 51)) || (a === 203 && b === 0))
+    ab === '169.254' || (a === 172 && b >= 16 && b < 32) || ab === '192.168' || ab === '198.18' || ab === '198.19' ||
+    ['192.0.0', '192.0.2', '198.51.100', '203.0.113'].includes(abc))
 }
 
 const publicUrl = u => { try { return isPublic(new URL(u).hostname.replace(/^\[|\]$/g, '')) } catch { return false } }

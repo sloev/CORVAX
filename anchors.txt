@@ -1,0 +1,3 @@
+# CORVAX community anchors: one line each, as `curl -s http://your-node:4799/` prints it.
+# Add yours with the "Add an anchor" issue. Releases ship the lines that answer at release time.
+corvax-anchor:w3nd11t347pqgy89seiwcfxen7x8ywcf7dka6rz9f6esp9g5bkey@corvax.sloev.workers.dev:443;web=https://corvax.sloev.workers.dev

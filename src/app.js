@@ -509,7 +509,7 @@ npx @sloev/corvax anchor --public-host IP
 
 # this anchor's list, as plain text
 curl -s ${node.origin}`),
-    h('p', {}, 'Wire protocol: ', h('a', { href: 'https://github.com/sloev/corvax/blob/main/SPEC.md' }, 'SPEC.md'), ' · ', h('a', { href: 'https://github.com/sloev/corvax' }, 'source')),
+    h('p', {}, 'Running a public anchor? ', h('a', { href: 'https://github.com/sloev/CORVAX/issues/new?template=add-anchor.yml' }, 'Add it to the list'), ' that every release ships. Wire protocol: ', h('a', { href: 'https://github.com/sloev/CORVAX/blob/main/SPEC.md' }, 'SPEC.md'), '.'),
     h('h3', {}, 'This node'), h('pre', { class: 'lines' }, node.line),
     h('h3', {}, 'Known anchors'), h('pre', { class: 'lines' }, anchors.textContent))
 }

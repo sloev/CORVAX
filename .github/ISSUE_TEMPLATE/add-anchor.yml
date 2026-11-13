@@ -1,0 +1,23 @@
+name: Add an anchor
+description: Add your public CORVAX anchor to the list that ships with every release.
+title: "Anchor: "
+labels: [anchor]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run a node that strangers can reach, e.g. `npx @sloev/corvax anchor --public-host <ip>`, then paste the first line that `curl -s http://<your-node>:4799/` prints.
+        A check runs at once and comments here. A maintainer then adds the `accepted` label, which adds the line to `anchors.txt`. Every release ships the anchors that answer at release time.
+  - type: textarea
+    id: line
+    attributes:
+      label: Anchor line
+      placeholder: "corvax-anchor:<52-char key>@<host>:<port>;web=https://…"
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: operator
+    attributes:
+      label: Operator (optional)
+      description: Who runs it, in case it breaks.

@@ -76,6 +76,8 @@ npx @sloev/corvax anchor --public-host IP   # the first anchors of a network
 npx @sloev/corvax anchors           # print the anchor book
 ```
 
+Running a public anchor? [Add it](https://github.com/sloev/CORVAX/issues/new?template=add-anchor.yml) to [`anchors.txt`](anchors.txt): the issue checks it live, and every release ships the listed anchors that answer at release time (`node scripts/anchors.js check` checks the list by hand).
+
 - **Browsers** opening a node's `/` get the CORVAX app: **DOX** (an overview and the JS API reference; shown first, then the last view is remembered), **APP** (identity, peers, messages, topics, follows, updates) and **STATS** (this anchor and your node).
 - **`curl -s http://node:4799/`** gets the plain anchor list.
 - **Cloudflare Worker anchor:** `npx wrangler deploy` in this repo (HTTPS only: inboxes, topic storage, Beacons mirrored to Mainline via pkarr, and a rate-limited WebSocket relay as a last resort; no UDP, so no DHT routing or STUN). Optional fixed key: `wrangler secret put CORVAX_SEED` (64 hex chars). Check it with `node test/worker-check.js https://corvax.<account>.workers.dev`.

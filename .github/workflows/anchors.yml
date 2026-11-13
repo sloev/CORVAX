@@ -1,0 +1,37 @@
+# "Add an anchor" issues: check the submitted line live and comment the result.
+# A maintainer's `accepted` label adds the working, new lines to anchors.txt (releases ship those that answer).
+name: anchors
+on:
+  issues:
+    types: [opened, edited, labeled]
+
+permissions: { contents: write, issues: write }
+concurrency: { group: anchors }
+
+jobs:
+  check:
+    if: startsWith(github.event.issue.title, 'Anchor:') && (github.event.action != 'labeled' || github.event.label.name == 'accepted')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_BODY: ${{ github.event.issue.body }}
+      N: ${{ github.event.issue.number }}
+      ACCEPTED: ${{ contains(github.event.issue.labels.*.name, 'accepted') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Check, or add when accepted
+        run: |
+          if [ "$ACCEPTED" != true ]; then
+            node scripts/anchors.js check - > report.md
+            printf '\n\nA maintainer adds the `accepted` label to add working lines to `anchors.txt`.\n' >> report.md
+            gh issue comment "$N" --body-file report.md
+          elif node scripts/anchors.js add > report.md; then
+            git config user.name github-actions; git config user.email github-actions@users.noreply.github.com
+            git add anchors.txt && git commit -qm "Add anchor from #$N" && git push
+            gh issue comment "$N" --body-file report.md && gh issue close "$N" --reason completed
+          else
+            gh issue comment "$N" --body-file report.md
+          fi

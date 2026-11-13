@@ -69,6 +69,7 @@ test('anchor lines: grep from messy text, parse, format, public filter', () => {
   assert.equal(parseLine(formatLine(e, 5)).hint, 5)
   assert.equal(parseLine(`corvax-anchor:${key}@[2a01:4f8::1]:4799`).host, '2a01:4f8::1')
   assert.ok(isPublic('2a01:4f8::1') && !isPublic('fd00::1') && !isPublic('10.1.2.3') && !isPublic('192.168.1.1') && isPublic('1.1.1.1'))
+  assert.ok(!isPublic('203.0.113.9') && isPublic('203.0.114.9') && !isPublic('192.0.2.1') && isPublic('192.0.3.1') && isPublic('198.51.1.1'), 'only the documentation /24s')
   const hostile = `corvax-anchor:${key}@8.8.4.4:1;web=<script>`
   assert.equal(parseLine(hostile.slice(0, hostile.indexOf('<'))).web, undefined)
   for (const web of ['http://127.0.0.1:80', 'http://x@10.0.0.1', 'https://[fd00::1]'])
