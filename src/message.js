@@ -6,7 +6,7 @@ import { identity, sign, verify, ephemeral, ecdh, hkdf, aesKey, encrypt, decrypt
 import { encode, decode } from './bencode.js'
 import { utf8, str, equal, hex } from './bytes.js'
 
-const MAX_MESSAGE = 4096
+export const MAX_MESSAGE = 16384                     // sealed bytes; fits a full WebRTC offer (Trystero, SDP)
 export const MAX_AGE = 600e3
 
 const key = async (shared, ephX, toX) => aesKey(await hkdf(shared, concat(utf8('cx/msg'), ephX, toX)))

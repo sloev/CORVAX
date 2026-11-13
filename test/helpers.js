@@ -11,7 +11,7 @@ export async function node (o = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'corvax-'))
   return start({
     port: port(), host: '127.0.0.1', allowPrivate: true, lan: false, publicHost: '127.0.0.1',
-    seedFile: join(dir, 'seed'), cacheFile: join(dir, 'anchors.txt'), intervals: { probe: 3600e3, check: 3600e3 }, rate: { burst: 1e6, perSecond: 1e6 }, ...o
+    dir, intervals: { probe: 3600e3, check: 3600e3 }, rate: { burst: 1e6, perSecond: 1e6 }, ...o
   })
 }
 

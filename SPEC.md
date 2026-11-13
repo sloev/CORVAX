@@ -34,7 +34,7 @@ v     DNS response (≤ 1000 B) of TXT records named "_cx", each "key=value":
 - Readers find lines in any text with `corvax-anchor:[^\s"'<>\`]+` and strip trailing `.,;:!?)]}`.
 - A line is only a claim until `cx_hi` succeeds. A `web=` whose host isn't public is dropped (except for LAN lines).
 
-**Message** (≤ 4096 B):
+**Message** (≤ 16384 B, enough for a full WebRTC offer):
 ```
 wire   eph_x 32 ‖ iv 12 ‖ AES-256-GCM(K, inner ‖ Ed25519(inner))
 K      HKDF-SHA256(X25519(eph, x_pub of recipient), info "cx/msg" ‖ eph_x ‖ recipient x_pub)
@@ -49,12 +49,15 @@ Every transport carries bencoded KRPC (`{t, y:"q", q, a}` → `{t, y:"r", r}` | 
 | Transport | Framing | Notes |
 |---|---|---|
 | UDP | one datagram | a datagram with first byte < 2 and the STUN cookie at bytes 4–7 is STUN (binding replies) |
-| HTTP `POST /krpc` | one body, one reply | `Content-Type: text/plain` (no CORS preflight), ≤ 8 KB, refused before it is read in full. A repeated `t` from the same IP within 60 s gets the cached reply. `get`, `put` and `get_peers` are recursive (the peer does the DHT work; no token); `get` also carries `k` (the public key) so HTTPS-only anchors can ask a pkarr relay |
-| WebRTC | text frame `"K" ‖ b64(bencode)` | on a connection's `cx` channel or a topic link: `cx_hi`, `cx_tpub`, `cx_tfind` |
+| HTTP `POST /krpc` | one body, one reply | `Content-Type: text/plain` (no CORS preflight), ≤ 24 KB, refused before it is read in full. A repeated `t` from the same IP within 60 s gets the cached reply. `get`, `put` and `get_peers` are recursive (the peer does the DHT work; no token); `get` also carries `k` (the public key) so HTTPS-only anchors can ask a pkarr relay |
+| WebRTC | text frame `"K" ‖ b64(bencode)` | on a connection's `cx` channel or a topic link: `cx_hi`, `cx_tpub`, `cx_tfind`. A topic link also carries `"M" ‖ JSON` app messages, attributed to the link's verified peer (mesh delivery, §10) |
+| BLE, Wi-Fi Direct | §12 | local radio links between nearby devices (apps) |
 
 Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabled · 206 bad signature · 302 stale.
 
-**`GET /`:** `text/plain` anchor lines (own line first), or, when `Accept` includes `text/html`, an HTML shell with `<script src="/cx/app.js">` followed by the same lines in `<pre id="anchors">`. `Vary: Accept`. `GET /cx/*.js` serves the library.
+**`GET /`:** `text/plain` anchor lines (own line first), or, when `Accept` includes `text/html`, an HTML shell with `<script src="/cx/app.js">` followed by the same lines in `<pre id="anchors">`. `Vary: Accept`. `GET /cx/*.js` serves the library. Every response carries `Access-Control-Allow-Origin: *` and `Access-Control-Allow-Private-Network: true`.
+
+**Local node:** apps look for a node on `http://127.0.0.1:4799` first (`cx_hi`, ≤ 800 ms) and use it as their first inbox, store and relay; native runtimes by default, browsers with `local: true`. The entry is LAN-only and never shared.
 
 ## 4. Queries
 
@@ -66,7 +69,7 @@ Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabl
 | `cx_anchors` | `{me?}` → `{a}` | own line + best 32 + 8 random lines; `me` introduces the caller |
 | `cx_check` | `{k, port, hport}` → `{udp, http, ip, by}` | asks a different anchor (`cx_probe`) to `cx_hi` the caller |
 | `cx_probe` | `{ip, port, hport, k}` → `{udp, http}` | only for callers that are verified anchors |
-| `cx_send` | `{to, msg}` → `{queued}` | inbox: 120 s, ≤ 64 per key, deduplicated by SHA-256 |
+| `cx_send` | `{to, msg}` → `{queued}` | inbox: 120 s, ≤ 64 messages and ≤ 1 MB per key, deduplicated by SHA-256 |
 | `cx_listen` | `{k, ts, sig, after?}` → `{msgs: [{seq, msg}]}` | HTTP. `sig = Ed25519("cx-listen:" ‖ ts)`, ±300 s. `seq` = max(previous + 1, unix ms), so it keeps rising across anchor restarts. Deletes `seq ≤ after`; waits ≤ 25 s; a newer poll for `k` ends the older one |
 | `cx_tpub` | `{r: [record ≤ 32]}` → `{ok: [status], now}` | §6 |
 | `cx_tfind` | `{t: [id ≤ 16]}` → `{r, now}` | live records, ≤ 100 per topic, newest first |
@@ -176,3 +179,37 @@ Any W3C-compatible object works. CORVAX uses only:
 - `createOffer`, `createAnswer`, `setLocalDescription`, `setRemoteDescription`, `addIceCandidate`, `close`
 - `localDescription`, `remoteDescription`, `onicecandidate`
 - channels: `send`, `binaryType`, `readyState`, `onopen`, `onmessage`, `onclose`
+
+## 10. Trystero over CORVAX
+
+`@sloev/trystero-corvax` implements Trystero's topic strategy (`createTopicStrategy`) on CORVAX, peer to peer:
+
+| Trystero | CORVAX |
+|---|---|
+| room (root topic `r`) | topic `"trystero:" ‖ r`: presence (lease, default 10 min) + broadcast links |
+| announce `{peerId}` | broadcast over the room's links, and a message to each `recent` member; repeated to newcomers on sight |
+| signal to peer topic `p` | to the address that sent from `p`: over its topic link when open (§3 `"M"`), else its inboxes |
+
+Body of every message: `{ tr1: 1, t: topic, st: sender's own topic, m: Trystero payload }`. The receiver maps `st` → the sender's verified address (message signature or link), so replies need no lookup and cannot be redirected. Messages for a topic not yet subscribed are kept 10 s and replayed on subscribe. Trystero encrypts signals with the room key; CORVAX seals them again for the recipient. Once a room has links, re-signalling needs no anchor.
+
+## 11. Host interface
+
+A node's I/O comes from a host; everything else (`node.js`, `anchor.js`, `lan.js`, the library) is shared. `src/host-node.js` is the Node/Bun/Deno host; desktop and Android apps provide their own:
+
+| Member | Contract |
+|---|---|
+| `udp({ port, address, reuse, group, broadcast }, onmessage(bytes, { address, port }))` | → `{ port, send(bytes, port, host), close() }` |
+| `http({ port, address }, handle, onsocket(path, ws))` | serve HTTP: `handle(req)` → `res`; WebSocket upgrades arrive framed as `{ send, close, onmessage, onclose }`. → `{ close() }` |
+| `asset(name)` | package files: `src/*.js`, `assets/logo/*` → bytes |
+| `kv(dir?)` | → `{ get(name) → string \| null, set(name, value) }` (seed, anchor cache) |
+| `dnsTxt(name)` | optional: TXT records (anchor discovery) |
+
+`req = { method, path, headers (lower-case), ip, port, body(max) → bytes, signal }` (`signal` aborts when the client leaves; it ends long polls); `res = { status, headers, body }`.
+
+## 12. Local radio links (apps)
+
+Nearby devices extend the mesh without internet or an access point.
+
+- **BLE:** service `c0a40001-0c0a-4c58-8000-00000000c0a4`; advertisement service data = first 8 bytes of the public key. Characteristic `…0002` (write without response) and `…0003` (notify) carry KRPC (§3) in chunks: `seq (1 B) ‖ flags (1 B: 1 = last) ‖ payload ≤ MTU − 5`; a message is ≤ 16 KB. Used for presence, messages and signalling; bulk data moves to Wi-Fi.
+- **Wi-Fi Direct:** DNS-SD service `_corvax._udp` with one TXT string, the node's anchor line for the group address. Group members then speak UDP, HTTP and WebRTC over the group network.
+- Found peers enter the anchor book as LAN entries (never shared). Offline, nearby nodes answer `get` from the Beacons they hold.

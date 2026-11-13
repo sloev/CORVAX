@@ -76,3 +76,11 @@ jobs:
         run: |
           npm publish "sloev-corvax-$V.tgz" --provenance --access public
           curl -fsS https://purge.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js || true
+      - name: Publish the Trystero transport to npm
+        continue-on-error: true          # its first version is published by hand; then trusted publishing for it too
+        working-directory: trystero
+        env: { NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" }
+        run: |
+          npm version "$V" --no-git-tag-version
+          npm pkg set "dependencies.@sloev/corvax=^$V"
+          npm publish --provenance --access public

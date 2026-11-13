@@ -147,3 +147,16 @@ test('a stale anchor cache does not starve bootstrap', async t => {
   t.after(() => p.close())
   assert.equal(p.inboxes[0]?.entry.key, a.key)
 })
+
+test('local node: apps on this device find the node by themselves and use it (no anchor list needed)', async t => {
+  const n = await node({ anchor: 'off' })                                 // an ordinary node, not an anchor
+  const local = `http://127.0.0.1:${n.port}`
+  const a = await Peer.create({ local, fallback: [] }), b = await Peer.create({ local, fallback: [] })
+  t.after(async () => { await a.close(); await b.close(); await n.close() })
+  assert.equal(a.inboxes[0]?.url, local, 'the local node is the first inbox')
+  await b.publish()
+  const got = new Promise(resolve => b.on(({ from, body }) => resolve([from, body])))
+  await a.send(b.address, { hi: 'local' })
+  assert.deepEqual(await got, [a.address, { hi: 'local' }])
+  assert.equal(a.anchors().includes('127.0.0.1'), false, 'the local entry is never shared')
+})

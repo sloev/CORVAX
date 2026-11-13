@@ -33,6 +33,7 @@
     "werift": "^0.27.0"
   },
   "devDependencies": {
+    "@trystero-p2p/core": "^0.27.0",
     "esbuild": "^0.25.10",
     "node-datachannel": "^0.33.6"
   },

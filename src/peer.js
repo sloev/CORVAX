@@ -60,6 +60,7 @@ export class Peer {
   async bootstrap (o = {}) {
     for (const t of [...(o.anchors || []), baked, await this.platform.loadCache?.() || '']) this.book.add(t)   // explicit first: probed first
     if (this.self) { this.book.add(this.self.line); this.book.record(this.self.key, 'id', true) }
+    await this.#findLocal(o.local ?? !isBrowser)
     const sources = [...(o.sources || [])]
     const home = typeof location !== 'undefined' && /^https?:/.test(import.meta.url) ? new URL('/', import.meta.url).href : null
     if (home) sources.push(home)            // the anchor that served this library is a source
@@ -77,6 +78,20 @@ export class Peer {
     await this.refresh()
     this.refresher = setInterval(() => this.refresh().catch(() => {}), 10 * 60e3)
     this.refresher.unref?.()
+  }
+
+  // A CORVAX node on this device (or the given URL) becomes our first inbox, store and relay: apps find the local
+  // node by themselves. Browsers opt in with local: true (a public page reaching localhost may prompt the user).
+  async #findLocal (local) {
+    if (!local || this.self) return
+    const url = typeof local === 'string' ? local.replace(/\/$/, '') : 'http://127.0.0.1:4799', n = random(16)
+    const r = await this.rpc(url, 'cx_hi', { n }, { timeout: 800, retries: 0 }).catch(() => null)
+    if (!r || !await hiOk(r, r.k, n)) return
+    const u = new URL(url), key = z32(r.k)
+    this.book.add(formatLine({ key, host: u.hostname.replace(/^\[|\]$/g, ''), port: +(u.port || 80) }), { lan: true })
+    this.book.record(key, 'id', true); this.book.record(key, 'http', true, 1)
+    Object.assign(this.book.get(key), { storage: !!r.st, relay: !!r.rl })
+    this.local = key
   }
 
   // Pull anchor lists from our anchors and verify what is new, so every peer converges on the same
@@ -106,12 +121,13 @@ export class Peer {
   // Where to reach an anchor over HTTP from here (browsers on https pages need an https origin).
   urlOf (e) {
     if (this.self && e.key === this.self.key) return this.self.url
-    if (isBrowser && typeof location !== 'undefined' && location.protocol === 'https:') return e.web?.startsWith('https:') ? e.web : null
+    if (isBrowser && typeof location !== 'undefined' && location.protocol === 'https:') return e.web?.startsWith('https:') ? e.web : /^(127\.|localhost$|::1$)/.test(e.host) ? hostUrl(e) : null   // loopback http is allowed on https pages
     return e.web || hostUrl(e)
   }
   #chooseInboxes () {
     if (this.self) return [{ entry: this.book.get(this.self.key), url: this.self.url }]
-    return this.book.best(2, isBrowser ? 'browser' : 'native', e => e.verified && this.urlOf(e))
+    const local = this.local && this.book.get(this.local), pick = local?.verified && this.urlOf(local) ? [local] : []
+    return [...pick, ...this.book.best(2, isBrowser ? 'browser' : 'native', e => e.verified && this.urlOf(e) && e !== local)].slice(0, 2)
       .map(entry => ({ entry, url: this.urlOf(entry) }))
   }
   // STUN: anchors proven to answer UDP, plus public fallbacks (HTTPS-only anchors, like Workers, can't do STUN)
@@ -200,6 +216,12 @@ export class Peer {
       return rtc.onSignal(this, from, body).catch(() => {})
     }
     if ('app' in (body || {})) for (const fn of this.handlers) fn({ from, body: body.app })
+  }
+  // An app message that arrived over an authenticated mesh link (Topics.sendVia).
+  deliver (from, text) {
+    let body
+    try { body = JSON.parse(text) } catch { return }
+    for (const fn of this.handlers) fn({ from, body, via: 'mesh' })
   }
 
   async #poll (ib) {

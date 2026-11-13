@@ -1,4 +1,4 @@
-// Topics, peer side: leased presence on storage peers and best-effort broadcast (SPEC §10).
+// Topics, peer side: leased presence on storage peers and best-effort broadcast (SPEC §6).
 //   publish/renew → 4 closest established + 1 random storage peers, own store, neighbours; batched, one timer
 //   search        → own store, neighbours, 6 + 2 storage peers; every record verified here (storage is untrusted)
 //   subscribe     → one cx_twatch long poll per storage peer, plus ≤ 4 neighbour links for broadcast
@@ -258,10 +258,18 @@ export class Topics {
     const link = { address, tid, channel, kind }
     this.links.set(key, link)
     channel.binaryType = 'arraybuffer'
-    channel.onmessage = e => typeof e.data === 'string'
-      ? e.data[0] === 'K' && this.peer.onChanText(channel, e.data)        // KRPC over the link (topic storage queries)
-      : this.#onFrame(link, e.data).catch(() => {})
+    channel.onmessage = e => typeof e.data !== 'string' ? this.#onFrame(link, e.data).catch(() => {})
+      : e.data[0] === 'K' ? this.peer.onChanText(channel, e.data)          // KRPC over the link (topic storage queries)
+      : e.data[0] === 'M' && this.peer.deliver(address, e.data.slice(1))  // an app message over the mesh (see sendVia)
     channel.onclose = () => { if (this.links.get(key) === link) { this.links.delete(key); this.maintainSoon(t) } }
+  }
+  // Send an app message to a topic neighbour over its link, if we have one (no anchor involved). The link is an
+  // authenticated WebRTC connection to that address, so the receiver attributes it to the link's peer.
+  sendVia (address, body) {
+    const l = [...this.links.values()].find(l => l.address === address && l.channel.readyState === 'open')
+    if (!l) return false
+    l.channel.send('M' + JSON.stringify(body))
+    return true
   }
   dropLinks (t) {
     for (const [key, l] of this.links) if (l.tid === t.hex) { this.links.delete(key); try { l.channel.close() } catch {} }

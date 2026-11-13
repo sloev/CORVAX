@@ -1,24 +1,22 @@
-// Peer services for native runtimes: the cx_* query handlers, inboxes, topic storage and the HTTP server.
+// Peer services for native hosts: the cx_* query handlers, inboxes, topic storage and the HTTP handler. No I/O here:
+// a host (SPEC §11) provides sockets and files, so the same code runs in Node, Bun, Deno, a desktop app or Android.
 // Every native peer runs the same code; being publicly reachable (an anchor) only decides who can use it.
 //   HTTP  GET /  homepage + anchor list · POST /krpc · GET /cx/*.js (library, app.js) · GET /favicon.ico, /og.png
 // Anchors are trusted with nothing: records are signed and messages end-to-end encrypted.
-import { createServer } from 'node:http'
-import { readFile } from 'node:fs/promises'
 import { encode, decode } from './bencode.js'
 import { verify, random, hiOk } from './crypto.js'
 import { verifyBeacon } from './record.js'
 import { hex, utf8, str, z32 } from './bytes.js'
 import { homepage, stats } from './home.js'
 import { Inboxes } from './inbox.js'
+import { MAX_MESSAGE } from './message.js'
 export { Inboxes }
 import { serve } from './store.js'
 import { serveSocket } from './relay.js'
-import { createHash } from 'node:crypto'
 
-const BODY_MAX = 8192
+const BODY_MAX = 24576                                // a 16 KB message plus its query
 const COST = { put: 6, cx_check: 12, cx_tpub: 2, cx_send: 1, cx_tfind: 1, cx_listen: 0.5, cx_twatch: 0.5, get: 1, get_peers: 1 }
 const ids = (x, max) => Array.isArray(x) ? x.filter(b => b instanceof Uint8Array && b.length === 32).slice(0, max) : []
-const srcDir = new URL('./', import.meta.url), logoDir = new URL('../assets/logo/', import.meta.url)
 
 export function installHandlers (node) {
   const h = node.dht.handlers
@@ -44,7 +42,7 @@ export function installHandlers (node) {
     return probe(node, str(a.ip), a.port, a.hport, a.k)
   }
   h.cx_send = async a => {
-    if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > 4096) throw [203, 'bad message']
+    if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > MAX_MESSAGE) throw [203, 'bad message']
     await node.inboxes.put(a.to, a.msg)
     return { queued: 1 }
   }
@@ -63,7 +61,11 @@ async function probe (node, ip, port, hport, k) {
   return { udp: udp ? 1 : 0, http: http ? 1 : 0 }
 }
 
-export function httpServer (node) {
+// The HTTP side of a node as one host-independent function (SPEC §11): req → res. Hosts (Node, desktop, Android)
+// own the sockets and HTTP parsing; long polls end when req.signal aborts (the client went away).
+//   req = { method, path, headers (lower-case), ip, port, body: max → Promise<Uint8Array | null>, signal }
+//   res = { status, headers, body }
+export function handler (node) {
   const buckets = new Map(), replays = new Map()
   const { burst, perSecond, polls: maxPolls } = { burst: 120, perSecond: 4, polls: 64, ...node.o?.rate }
   const allow = (ip, q) => {
@@ -77,32 +79,40 @@ export function httpServer (node) {
     return true
   }
   const polls = new Map()   // ip -> open long polls
+  const bytes = body => ({ status: 200, headers: { 'content-type': 'text/plain' }, body }), reply = m => bytes(encode(m))
 
-  async function krpc (req, res, ip, port) {
-    const body = await readBody(req)
+  async function krpc (req) {
+    const body = await req.body(BODY_MAX)
     let m
-    try { m = decode(body) } catch { return reply(res, { y: 'e', e: [203, 'bad message'] }) }
-    if (!(m.q instanceof Uint8Array) || !m.a || !(m.t instanceof Uint8Array) || m.t.length > 8) return reply(res, { y: 'e', e: [203, 'bad query'] })
-    const q = str(m.q), a = m.a, key = `${ip}|${hex(m.t)}`
+    try { m = decode(body) } catch { return reply({ y: 'e', e: [203, 'bad message'] }) }
+    if (!(m.q instanceof Uint8Array) || !m.a || !(m.t instanceof Uint8Array) || m.t.length > 8) return reply({ y: 'e', e: [203, 'bad query'] })
+    const q = str(m.q), a = m.a, key = `${req.ip}|${hex(m.t)}`
     const hit = replays.get(key)
-    if (hit && Date.now() - hit.t < 60e3) return res.end(hit.bytes)
-    if (!allow(ip, q)) return reply(res, { t: m.t, y: 'e', e: [202, 'rate limited'] })
-    const from = { host: ip, port, http: true }
+    if (hit && Date.now() - hit.t < 60e3) return bytes(hit.bytes)
+    if (!allow(req.ip, q)) return reply({ t: m.t, y: 'e', e: [202, 'rate limited'] })
+    const from = { host: req.ip, port: req.port, http: true }
     let out
-    try { out = { t: m.t, y: 'r', r: { id: node.dht.id, ...await answer(q, a, from, res) } } } catch (e) {
+    try { out = { t: m.t, y: 'r', r: { id: node.dht.id, ...await answer(q, a, from, req.signal) } } } catch (e) {
       const [code, msg] = Array.isArray(e) ? e : [201, e.message || 'error']
       out = { t: m.t, y: 'e', e: [code, msg] }
     }
-    const bytes = encode(out)
+    const wire = encode(out)
     if (q !== 'cx_listen' && q !== 'cx_twatch') {
-      replays.set(key, { bytes, t: Date.now() })
+      replays.set(key, { bytes: wire, t: Date.now() })
       if (replays.size > 5000) for (const [k, v] of replays) if (Date.now() - v.t > 60e3) replays.delete(k)
     }
-    res.end(bytes)
+    return bytes(wire)
+  }
+  // Long polls: at most `polls` open per IP, released however they end.
+  async function poll (ip, fn) {
+    const open = polls.get(ip) || 0
+    if (open >= maxPolls) throw [202, 'too many polls']
+    polls.set(ip, open + 1)
+    try { return await fn() } finally { const n = polls.get(ip) - 1; n ? polls.set(ip, n) : polls.delete(ip) }
   }
 
   // Over HTTP, get/put/get_peers are recursive: the anchor does the DHT work for the client.
-  async function answer (q, a, from, res) {
+  async function answer (q, a, from, signal) {
     if (q === 'get') {
       if (!(a.target instanceof Uint8Array) || a.target.length !== 20) throw [203, 'bad target']
       const item = await node.dht.get(a.target)
@@ -123,104 +133,45 @@ export function httpServer (node) {
       if (!node.storing()) throw [204, 'storage disabled on this peer']
       const t = ids(a.t, 64)
       if (!t.length) throw [203, 'no topics']
-      const open = polls.get(from.host) || 0
-      if (open >= maxPolls) throw [202, 'too many polls']
-      polls.set(from.host, open + 1)
-      const ac = new AbortController()
-      res.on('close', () => ac.abort())
-      try {
-        const r = await node.store.watch(t, a.c instanceof Uint8Array ? str(a.c) : undefined, ac.signal)
+      return poll(from.host, async () => {
+        const r = await node.store.watch(t, a.c instanceof Uint8Array ? str(a.c) : undefined, signal)
         return { c: r.c, r: r.r, now: Date.now(), ...(r.snap && { snap: 1 }) }
-      } finally { polls.set(from.host, polls.get(from.host) - 1) }
+      })
     }
     if (q === 'cx_listen') {
       if (!(a.k instanceof Uint8Array) || a.k.length !== 32 || typeof a.ts !== 'number' || Math.abs(Date.now() - a.ts) > 300e3) throw [203, 'bad listen']
       if (!await verify(a.k, a.sig, utf8(`cx-listen:${a.ts}`))) throw [206, 'bad signature']
-      const open = polls.get(from.host) || 0
-      if (open >= maxPolls) throw [202, 'too many polls']
-      polls.set(from.host, open + 1)
-      const ac = new AbortController()
-      res.on('close', () => ac.abort())                                 // the client went away
-      try { return { msgs: await node.inboxes.listen(a.k, typeof a.after === 'number' ? a.after : 0, ac.signal) } } finally { polls.set(from.host, polls.get(from.host) - 1) }
+      return poll(from.host, async () => ({ msgs: await node.inboxes.listen(a.k, typeof a.after === 'number' ? a.after : 0, signal) }))
     }
     return node.dht.answer(q, a, from)
   }
 
-  const server = createServer(async (req, res) => {
-    res.setHeader('access-control-allow-origin', '*')
-    res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS')
-    res.setHeader('access-control-allow-headers', 'content-type')
-    const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, ''), port = req.socket.remotePort
-    try {
-      const path = new URL(req.url, 'http://x').pathname
-      if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end() }
-      if (req.method === 'POST' && path === '/krpc') { res.setHeader('content-type', 'text/plain'); return await krpc(req, res, ip, port) }
-      if (req.method !== 'GET') { res.statusCode = 405; return res.end() }
-      if (path === '/') {
-        res.setHeader('vary', 'accept')
-        res.setHeader('cache-control', 'public, max-age=30')
-        if (!/text\/html/.test(req.headers.accept || '')) {             // curl, wget, scripts, fetch(): plain anchor lines
-          res.setHeader('content-type', 'text/plain; charset=utf-8')
-          return res.end(node.listing() + '\n')
-        }
-        res.setHeader('content-type', 'text/html; charset=utf-8')
-        const origin = node.web || `http://${String(req.headers.host || `${node.host}:${node.port}`).replace(/[^\w.:[\]-]/g, '')}`
-        return res.end(homepage({ origin, line: node.line() || `(not an anchor) ${node.key}`, anchor: !!node.line(), services: node.services(), uptime: Date.now() - node.started, anchors: node.listing(), stats: stats(node, { inboxes: node.inboxes, store: node.store, bridges: node.peer?.bridges, extra: { dht: node.dht.nodes.size } }) }))
-      }
-      if (path === '/favicon.ico') return send(res, new URL('favicon.ico', logoDir), 'image/x-icon', true)
-      if (path === '/og.png') return send(res, new URL('corvax-256.png', logoDir), 'image/png', true)
-      if (/^\/cx\/[a-z]+\.js$/.test(path)) return send(res, new URL(path.slice(4), srcDir), 'text/javascript; charset=utf-8')
-      res.statusCode = 404; res.end()
-    } catch { if (!res.headersSent) res.statusCode = 400; res.end() }
-  })
-  server.requestTimeout = 40e3
-  server.on('upgrade', (req, socket) => {
-    if (new URL(req.url, 'http://x').pathname !== '/relay' || !node.peer?.relayFor) return socket.destroy()
-    serveSocket(node.peer, websocket(req, socket))
-  })
-  return server
-}
-
-async function send (res, url, type, cache = false) {
-  const data = await readFile(url)
-  res.setHeader('content-type', type)
-  if (cache) res.setHeader('cache-control', 'public, max-age=31536000, immutable')
-  res.end(data)
-}
-function readBody (req) {
-  return new Promise((resolve, reject) => {
-    const parts = []; let n = 0
-    req.on('data', d => { n += d.length; if (n > BODY_MAX) { req.destroy(); reject(new Error('too large')) } else parts.push(d) })
-    req.on('end', () => resolve(new Uint8Array(Buffer.concat(parts)))).on('error', reject)
-  })
-}
-function reply (res, m) { res.end(encode(m)) }
-
-// Minimal RFC 6455 server socket: text and binary messages, ping/pong, close. Frames ≤ 64 KB.
-function websocket (req, socket) {
-  const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
-  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`)
-  const frame = (op, data) => {
-    const n = data.length, head = n < 126 ? [0x80 | op, n] : [0x80 | op, 126, n >> 8, n & 255]
-    if (n < 65536 && !socket.destroyed) socket.write(Buffer.concat([Buffer.from(head), data]))
+  const file = async (name, type, cache) => ({ status: 200, headers: { 'content-type': type, ...(cache && { 'cache-control': 'public, max-age=31536000, immutable' }) }, body: await node.io.asset(name) })
+  return async req => {
+    const cors = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'content-type', 'access-control-allow-private-network': 'true' }
+    const out = await route(req).catch(() => ({ status: 400 }))
+    return { ...out, headers: { ...cors, ...out.headers } }
   }
-  const ws = { send: d => frame(typeof d === 'string' ? 1 : 2, Buffer.from(d)), close: () => socket.end(), onmessage () {}, onclose () {} }
-  let buf = Buffer.alloc(0), parts = []
-  socket.on('data', d => {
-    buf = Buffer.concat([buf, d])
-    while (buf.length >= 6) {
-      let len = buf[1] & 127, off = 2
-      if (len === 126) { len = buf.readUInt16BE(2); off = 4 } else if (len === 127) return socket.destroy()
-      if (!(buf[1] & 128) || buf.length < off + 4 + len) return                  // clients must mask; wait for more
-      const mask = buf.subarray(off, off + 4), data = Buffer.from(buf.subarray(off + 4, off + 4 + len)), op = buf[0] & 15, fin = buf[0] & 128
-      for (let i = 0; i < data.length; i++) data[i] ^= mask[i & 3]
-      buf = buf.subarray(off + 4 + len)
-      if (op === 8) return socket.end()
-      if (op === 9) { frame(10, data); continue }
-      if (op === 1 || op === 2) parts = [data, op]; else if (op === 0) parts[0] = Buffer.concat([parts[0], data]); else continue
-      if (fin) ws.onmessage(parts[1] === 1 ? parts[0].toString() : new Uint8Array(parts[0]))
+  async function route (req) {
+    const { method, path } = req
+    if (method === 'OPTIONS') return { status: 204 }
+    if (method === 'POST' && path === '/krpc') return krpc(req)
+    if (method !== 'GET') return { status: 405 }
+    if (path === '/') {
+      const headers = { vary: 'accept', 'cache-control': 'public, max-age=30' }
+      if (!/text\/html/.test(req.headers.accept || '')) return { status: 200, headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' }, body: node.listing() + '\n' }   // curl, scripts, fetch()
+      const origin = node.web || `http://${String(req.headers.host || `${node.host}:${node.port}`).replace(/[^\w.:[\]-]/g, '')}`
+      return { status: 200, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' }, body: homepage({ origin, line: node.line() || `(not an anchor) ${node.key}`, anchor: !!node.line(), services: node.services(), uptime: Date.now() - node.started, anchors: node.listing(), stats: stats(node, { inboxes: node.inboxes, store: node.store, bridges: node.peer?.bridges, extra: { dht: node.dht.nodes.size } }) }) }
     }
-  })
-  socket.on('close', () => ws.onclose()).on('error', () => socket.destroy())
-  return ws
+    if (path === '/favicon.ico') return file('assets/logo/favicon.ico', 'image/x-icon', true)
+    if (path === '/og.png') return file('assets/logo/corvax-256.png', 'image/png', true)
+    if (/^\/cx\/[a-z]+\.js$/.test(path)) return file('src/' + path.slice(4), 'text/javascript; charset=utf-8')
+    return { status: 404 }
+  }
+}
+
+// WebSocket upgrades: the host has done the RFC 6455 handshake and hands over { send, close, onmessage, onclose }.
+export function socket (node, path, ws) {
+  if (path !== '/relay' || !node.peer?.relayFor) return ws.close()
+  serveSocket(node.peer, ws)
 }

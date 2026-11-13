@@ -66,6 +66,21 @@ A whole page with a live visitor counter (open it in two tabs):
 
 And a chat room: `const chat = await room('my-chat', (body, from) => …)`, then `chat.send({ text: 'hi' })`.
 
+### Trystero
+
+[Trystero](https://github.com/dmotz/trystero) rooms can signal over CORVAX instead of a relay server ([`@sloev/trystero-corvax`](trystero)):
+
+```js
+import { joinRoom } from '@sloev/trystero-corvax'   // npm i @trystero-p2p/core @sloev/trystero-corvax
+const room = joinRoom({ appId: 'my-app' }, 'lobby')
+```
+
+Members are found by CORVAX presence, and signals travel over the room's own mesh when they can, so rooms keep re-signalling with no anchor at all. Two browsers join in about 0.3 s.
+
+### A node on this device
+
+Apps find a CORVAX node running on the same device (`http://127.0.0.1:4799`) by themselves and use it first: native runtimes by default, browsers with `Peer.create({ local: true })`.
+
 Outside browsers, WebRTC comes from `werift` (an optional dependency); pass your own with `Peer.create({ RTCPeerConnection })`. STUN uses anchors that answer UDP plus `stun:stun.cloudflare.com:3478` (`Peer.create({ stun })`). When no given or cached anchor answers, peers fall back to `https://corvax.sloev.workers.dev/` (`Peer.create({ fallback })`).
 
 ## Run a node

@@ -1,21 +1,16 @@
-// A native CORVAX node (Node, Bun, Deno): a Peer plus everything only native runtimes can do.
+// A native CORVAX node: a Peer plus everything that needs sockets. All I/O goes through a host (SPEC §11):
+// the Node host by default (Node, Bun, Deno), or one a desktop / Android app provides (option io).
 //   one port number: UDP (DHT · STUN · cx_*) + TCP (HTTP: homepage, /krpc, library)
-//   LAN discovery, Mainline DHT, a file cache, and automatic promotion to anchor when reachable.
-import { createSocket } from 'node:dgram'
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+//   LAN discovery, Mainline DHT, a cached anchor book, and automatic promotion to anchor when reachable.
 import { DHT, MAINLINE, ANCHOR_TOPIC } from './dht.js'
 import { Book, formatLine } from './book.js'
 import { Peer, hostUrl } from './peer.js'
 import { identity, sha1, random, hiOk } from './crypto.js'
-import { installHandlers, httpServer, Inboxes, post } from './anchor.js'
+import { installHandlers, handler, socket, Inboxes, post } from './anchor.js'
 import { startLan } from './lan.js'
 import { isStun, stunReply } from './stun.js'
 import { TopicStore } from './store.js'
 import { hex, unhex, utf8, str, z32, unz32 } from './bytes.js'
-
-const DIR = join(homedir(), '.config', 'corvax')
 
 export async function start (o = {}) {
   const node = new CorvaxNode(o)
@@ -27,7 +22,7 @@ class CorvaxNode {
   constructor (o) {
     this.o = {
       port: 4799, host: '0.0.0.0', anchor: 'auto', storage: true, lan: true, lanPort: 4798, mdns: true, mainline: false,
-      seedFile: join(DIR, 'seed'), cacheFile: join(DIR, 'anchors.txt'),
+      dir: undefined,              // where the host keeps the seed and the anchor cache (Node: ~/.config/corvax)
       intervals: { probe: 600e3, check: 1800e3 }, log: () => {}, ...o
     }
     this.port = this.o.port
@@ -53,29 +48,27 @@ class CorvaxNode {
   async start () {
     const o = this.o, log = o.log
     this.started = Date.now()
+    this.io = o.io || (await import('./host-node.js')).default
+    this.kv = this.io.kv(o.dir)
     this.id = await identity(o.seed ? (typeof o.seed === 'string' ? unhex(o.seed) : o.seed) : await this.#seed())
     this.key = z32(this.id.pub)
     this.book = new Book({ allowPrivate: o.allowPrivate })
-    this.book.add(await readFile(o.cacheFile, 'utf8').catch(() => ''))
+    this.book.add(await this.kv.get('anchors.txt') || '')
     for (const t of o.anchors || []) this.book.add(t)
 
     // UDP: STUN and KRPC share the port
-    this.udp = createSocket('udp4')
-    this.dht = new DHT({ send: (b, to) => { try { this.udp.send(b, to.port, to.host) } catch {} }, id: (await sha1(this.id.pub)), ro: true })
-    this.udp.on('message', (b, r) => {
+    this.dht = new DHT({ send: (b, to) => this.udp.send(b, to.port, to.host), id: (await sha1(this.id.pub)), ro: true })
+    this.udp = await this.io.udp({ port: this.port, address: this.host }, (b, r) => {
       const from = { host: r.address, port: r.port }
       if (isStun(b)) this.udp.send(stunReply(b, from), r.port, r.address)
-      else this.dht.receive(new Uint8Array(b), from)
+      else this.dht.receive(b, from)
     })
-    this.udp.on('error', e => log('udp', e.message))
-    await new Promise((resolve, reject) => { this.udp.once('error', reject); this.udp.bind(this.port, this.host, resolve) })
-    this.port = this.udp.address().port
+    this.port = this.udp.port
     installHandlers(this)
-    this.http = httpServer(this)
-    await new Promise((resolve, reject) => { this.http.once('error', reject); this.http.listen(this.port, this.host, resolve) })
+    this.http = await this.io.http({ port: this.port, address: this.host }, handler(this), (path, ws) => socket(this, path, ws))
 
     if (o.lan) {
-      this.lan = await startLan({ port: o.lanPort, mdns: o.mdns, lines: () => this.listing(), onFound: t => this.book.add(t, { lan: true }) }).catch(() => null)
+      this.lan = await startLan({ io: this.io, port: o.lanPort, mdns: o.mdns, lines: () => this.listing(), onFound: t => this.book.add(t, { lan: true }) }).catch(() => null)
     }
     if (o.mainline) this.dht.bootstrap(MAINLINE).then(n => log(`mainline: ${n} nodes`)).catch(() => {})
 
@@ -93,7 +86,7 @@ class CorvaxNode {
         loadCache: () => '',
         saveCache: t => this.#saveCache(t),
         probe: entries => this.probe(entries),
-        dnsTxt: name => import('node:dns/promises').then(d => d.resolveTxt(name)).then(r => r.map(x => x.join('')).join('\n'))
+        dnsTxt: this.io.dnsTxt
       }
     })
     if (this.storing()) { const me = this.book.get(this.key); if (me) me.storage = true }
@@ -178,16 +171,13 @@ class CorvaxNode {
   }
 
   async #seed () {
-    try { return unhex((await readFile(this.o.seedFile, 'utf8')).trim()) } catch {}
+    const saved = (await this.kv.get('seed'))?.trim()
+    if (saved?.length === 64) return unhex(saved)
     const seed = random(32)
-    await mkdir(dirname(this.o.seedFile), { recursive: true })
-    await writeFile(this.o.seedFile, hex(seed), { mode: 0o600 })
+    await this.kv.set('seed', hex(seed))
     return seed
   }
-  async #saveCache (text) {
-    if (!this.o.cacheFile) return
-    try { await mkdir(dirname(this.o.cacheFile), { recursive: true }); await writeFile(this.o.cacheFile, text) } catch {}
-  }
+  async #saveCache (text) { await this.kv.set('anchors.txt', text).catch(() => {}) }
 
   async close () {
     for (const t of this.timers) clearInterval(t)
@@ -196,8 +186,7 @@ class CorvaxNode {
     await this.peer?.close()
     this.lan?.close()
     this.dht.close()
-    try { this.udp.close() } catch {}
-    this.http.closeAllConnections?.()
-    await new Promise(resolve => this.http.close(resolve))
+    this.udp.close()
+    await this.http.close()
   }
 }

@@ -1,0 +1,15 @@
+{
+  "name": "@sloev/trystero-corvax",
+  "version": "0.1.0",
+  "description": "Trystero signalling over CORVAX: peer to peer, no relay server; rooms keep re-signalling over their own mesh.",
+  "type": "module",
+  "exports": "./index.js",
+  "files": ["index.js", "README.md"],
+  "dependencies": { "@sloev/corvax": "^0.1.0" },
+  "peerDependencies": { "@trystero-p2p/core": ">=0.27.0 <0.28.0" },
+  "repository": { "type": "git", "url": "git+https://github.com/sloev/CORVAX.git", "directory": "trystero" },
+  "homepage": "https://corvax.sloev.workers.dev/",
+  "keywords": ["trystero", "webrtc", "p2p", "signalling", "corvax"],
+  "license": "MIT",
+  "publishConfig": { "access": "public" }
+}

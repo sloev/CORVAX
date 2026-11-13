@@ -6,6 +6,7 @@ import { identity, hiOk, random, sha1, verify } from '../src/crypto.js'
 import { encode, decode } from '../src/bencode.js'
 import { TopicStore, serve } from '../src/store.js'
 import { Inboxes } from '../src/inbox.js'
+import { MAX_MESSAGE } from '../src/message.js'
 import { Book, formatLine } from '../src/book.js'
 import { homepage, stats } from '../src/home.js'
 import { pack, unpack, verifyBeacon } from '../src/record.js'
@@ -17,7 +18,7 @@ import og from '../assets/logo/corvax-256.png'
 const RELAY = 'https://relay.pkarr.org', CORS = { 'access-control-allow-origin': '*' }
 // WebSocket relaying is a last resort here: few, slow sessions and a small hourly budget.
 const RELAYING = { sessions: 4, kbps: 256, hourBytes: 200e6, socketsPerIp: 2, opensPerIpMinute: 6 }
-const POLLS_PER_IP = 64, BODY_MAX = 8192
+const POLLS_PER_IP = 64, BODY_MAX = 24576
 const COST = { put: 6, cx_tpub: 2, cx_send: 1, cx_tfind: 1, get: 1 }
 
 export default {
@@ -107,7 +108,7 @@ export class Anchor extends DurableObject {
     if (['cx_hi', 'cx_tpub', 'cx_tfind'].includes(q)) return serve({ id: this.id, store: this.store, line: this.line(origin), relay: true, stored: raw => this.persist(raw) }, q, a)
     if (q === 'cx_anchors') { if (a.me instanceof Uint8Array && a.me.length <= 255) this.ctx.waitUntil(this.learn(str(a.me))); return { a: this.listing(origin) } }
     if (q === 'cx_send') {
-      if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > 4096) throw [203, 'bad message']
+      if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > MAX_MESSAGE) throw [203, 'bad message']
       await this.inboxes.put(a.to, a.msg)
       return { queued: 1 }
     }

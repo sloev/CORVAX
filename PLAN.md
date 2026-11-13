@@ -1,4 +1,4 @@
-# CORVAX: Plan v1.0
+# CORVAX: Plan v1.1
 
 > Find any peer by its key or by a topic, from any runtime, and open an encrypted WebRTC DataChannel to it.
 > The infrastructure introduces; the peers communicate.
@@ -10,10 +10,13 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 1. **Identity:** one seed gives an Ed25519 address and an X25519 key.
 2. **Anchor book:** a verified, scored list of reachable peers, shared over every channel.
 3. **Discovery by key:** signed Beacons in the DHT (pkarr-compatible).
-4. **Signalling:** signed, sealed messages via inbox anchors.
+4. **Signalling:** signed, sealed messages via inbox anchors, or over the mesh.
 5. **Connection:** a WebRTC DataChannel, direct or through any third peer.
 6. **Topic presence:** leased, signed provider records on storage peers.
 7. **Topic broadcast:** short, signed, best-effort frames between topic neighbours.
+8. **Trystero transport:** Trystero rooms signalled over CORVAX, peer to peer (SPEC §10).
+9. **One codebase, many hosts:** the JS core everywhere; a host supplies sockets (SPEC §11). Apps on this device find the local node.
+10. **Local radios (apps):** BLE and Wi-Fi Direct between nearby devices (SPEC §12).
 
 **One kind of peer.** An anchor is a peer that is publicly reachable and expected to stay online. Nothing else distinguishes it.
 
@@ -22,7 +25,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 - rooms, history, durable or acknowledged messaging, group encryption
 - gossip beyond bounded broadcast, introductions, reputation, incentives, telemetry, central services
 - our own WebRTC stack, TURN, WebTransport, UPnP, DNS servers, ICMP; WebSocket except an anchor's `/relay`
-- BEP 5 as a topic index
+- BEP 5 as a topic index; a second implementation of the protocol
 
 ## Decisions
 
@@ -40,18 +43,37 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 | Presence only `recent` / `expired` | A lease proves a recent publication, not that the peer is online |
 | Broadcasts never stored | Durability is out of scope |
 | `werift` as the default native WebRTC, injectable | Pure JS on Node, Bun and Deno |
+| Messages ≤ 16 KB sealed | Fits any WebRTC offer, Trystero's included (its signals measure 150 B – 1 KB) |
+| Trystero via its public `createTopicStrategy`, our own package | No fork, no relay; members by presence, signals mesh-first |
+| One JS core + hosts, not a native rewrite | One protocol implementation; apps stay small (system webview + a thin native shell) |
+| Apps live in `sloev/corvax-native` | The protocol repo stays small and runtime-free |
+
+## One-shot plan v1.1
+
+| # | Where | Work | Status |
+|---|---|---|---|
+| 1 | here | Messages ≤ 16 KB (library, native and Worker anchors, SPEC) | ✅ |
+| 2 | here | `@sloev/trystero-corvax`: presence for members, announce over mesh + to members, signals over mesh links else inboxes; early-message buffer | ✅ |
+| 3 | here | Tests: stock Trystero rooms (Node + werift; Chromium), join time, recovery with no anchor left | ✅ joined in 0.3 s (Chromium); re-signals over the mesh with the anchor gone |
+| 4 | here | Host interface: `anchor.js` / `node.js` / `lan.js` free of Node APIs; `host-node.js` | ✅ |
+| 5 | here | Local node: apps find `127.0.0.1:4799` (native by default, browsers `local: true`), never shared; loopback allowed on https pages | ✅ |
+| 6 | here | SPEC §10–12, README, DOX, release job publishes the transport | ✅ |
+| 7 | corvax-native | Desktop app (Tauri v2): the core in a hidden webview, Rust host (UDP, HTTP, WebSocket, kv), tray, NODE view; ≤ 8 MB | sketched |
+| 8 | corvax-native | Android app: foreground service (`connectedDevice`) with a headless WebView, Kotlin host, BLE + Wi-Fi Direct + NSD; APK ≤ 6 MB; GitHub + F-Droid | sketched |
+| 9 | upstream | Trystero issue with design and numbers, then a PR as the maintainer prefers | after 2 releases of the transport |
 
 ## Status
 
-- [x] **Node:** 48 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app)
+- [x] **Node:** 51 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app, Trystero)
 - [x] **Bun 1.4 and Deno 2.9:** smoke test (anchors, messages, direct and relayed channels, topics)
 - [x] **Live:** our Beacon round-trips through `relay.pkarr.org`; DNS TXT via DoH
-- [x] **Homepage app:** DOX (overview + JS API reference) / APP / STATS; DOX first, then the last view remembered; CORVAX wordmark in the header. APP: identity, peers with honest presence, messages and live chat, topics, follows, live-only updates. Driven end to end in Chromium (`test/app.test.js`); no sideways scroll at 320–420 px
-- [x] **Releases:** every green push to `main` is `v0.1.<run>`: minified ESM bundle (~50 KB, 18 KB gzipped) published to npm as `@sloev/corvax`, GitHub release with bundle and tarball, `latest` tag moved, 10 newest kept. One way to load it everywhere: `cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js` in browsers, `npm i corvax` elsewhere
+- [x] **Homepage app:** DOX (overview + JS API reference) / APP / STATS; DOX first, then the last view remembered. APP: identity, peers with honest presence, messages and live chat, topics, follows, live-only updates, optional local node. Driven end to end in Chromium (`test/app.test.js`); no sideways scroll at 320–420 px
+- [x] **Releases:** every green push to `main` is `v0.1.<run>`: minified ESM bundle (~50 KB, 18 KB gzipped) published to npm as `@sloev/corvax` (and `@sloev/trystero-corvax`), GitHub release with bundle and tarball, `latest` tag moved, 10 newest kept. One way to load it everywhere: `cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js` in browsers, `npm i @sloev/corvax` elsewhere
 - [x] **Helpers:** `presence(onCount)` (a live visitor counter in one call) and `room(name, onMessage)` (topic chat), in `src/kit.js`
-- [x] **Live presence counter:** the homepage counts its viewers on topic `corvax-worker-home`: per-tab key (a reload is the same visitor), 2-min lease, pre-signed withdrawal sent on hide/close, live via one watch poll, no Beacon, inbox or WebRTC links
+- [x] **Live presence counter:** the homepage counts its viewers on topic `corvax-worker-home`: per-tab key, 2-min lease, pre-signed withdrawal sent on hide/close, live via one watch poll, no Beacon, inbox or WebRTC links
 - [x] **Community anchors:** "Add an anchor" issue form → live `cx_hi` check commented on the issue → a maintainer's `accepted` label appends it to `anchors.txt`; each release bakes the lines that answer into `src/anchors.js`
 - [x] **Public anchor** `https://corvax.sloev.workers.dev` (Cloudflare Worker, `worker/`): `test/worker-check.js` passes live; topic records persist in SQLite across evictions; zero-config peers bootstrap from it; its Beacons reach Mainline via the pkarr relay
 - [ ] Firefox and WebKit (CI, run by hand), real Safari
 - [ ] Two browsers on two real networks
 - [ ] A live run on the Mainline DHT (needs outbound UDP)
+- [ ] Apps (corvax-native): build, 24 h background test on Android, offline mesh between two phones

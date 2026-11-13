@@ -2,7 +2,7 @@
 import { hex } from './bytes.js'
 import { sha256 } from './crypto.js'
 
-const INBOX_TTL = 120e3, INBOX_MAX = 64, POLL_MAX = 25e3
+const INBOX_TTL = 120e3, INBOX_MAX = 64, INBOX_BYTES = 1 << 20, POLL_MAX = 25e3   // per recipient: ≤ 64 messages, ≤ 1 MB
 
 export class Inboxes {
   constructor () { this.boxes = new Map() }
@@ -18,7 +18,7 @@ export class Inboxes {
     if (!box.msgs.some(m => m.h === h)) {                              // retries are idempotent
       box.seq = Math.max(box.seq + 1, Date.now())                    // rises across restarts: a client's `after` stays valid
       box.msgs.push({ seq: box.seq, msg, h, t: Date.now() })
-      if (box.msgs.length > INBOX_MAX) box.msgs.shift()
+      while (box.msgs.length > INBOX_MAX || box.msgs.reduce((n, m) => n + m.msg.length, 0) > INBOX_BYTES) box.msgs.shift()
     }
     box.waiter?.(); box.waiter = null
   }

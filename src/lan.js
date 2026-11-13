@@ -1,19 +1,14 @@
-// LAN discovery (native only): every node answers, anchor or not.
+// LAN discovery (hosts with UDP): every node answers, anchor or not.
 //   UDP broadcast/multicast: send "CX?" to 255.255.255.255 and 239.255.42.99 on port 4798 → reply: anchor lines
 //   mDNS: query TXT _corvax._udp.local on 224.0.0.251:5353 → answer: one anchor line per TXT string
-import { createSocket } from 'node:dgram'
-
 const GROUP = '239.255.42.99', MDNS = '224.0.0.251', MDNS_PORT = 5353, NAME = '_corvax._udp.local'
 const te = new TextEncoder(), td = new TextDecoder()
 
-export async function startLan ({ port = 4798, mdns = true, lines, onFound }) {
+export async function startLan ({ io, port = 4798, mdns = true, lines, onFound }) {
+  io ||= (await import('./host-node.js')).default
   const sockets = []
   const open = async (p, group, onMsg) => {
-    const s = createSocket({ type: 'udp4', reuseAddr: true })
-    s.on('error', () => {})
-    s.on('message', (b, r) => onMsg(s, new Uint8Array(b), r))
-    await new Promise((resolve, reject) => { s.once('error', reject); s.bind(p, () => { s.off('error', reject); resolve() }) })
-    try { s.setBroadcast(true); s.addMembership(group); s.setMulticastLoopback(true) } catch {}
+    const s = await io.udp({ port: p, reuse: true, group, broadcast: true }, (b, r) => s && onMsg(s, b, r))
     sockets.push(s)
     return s
   }
@@ -40,11 +35,11 @@ export async function startLan ({ port = 4798, mdns = true, lines, onFound }) {
   return {
     // Ask the network; answers arrive through onFound.
     discover () {
-      try { probe.send(te.encode('CX?'), port, '255.255.255.255') } catch {}
-      try { probe.send(te.encode('CX?'), port, GROUP) } catch {}
-      try { md?.send(dnsQuery(), MDNS_PORT, MDNS) } catch {}
+      probe.send(te.encode('CX?'), port, '255.255.255.255')
+      probe.send(te.encode('CX?'), port, GROUP)
+      md?.send(dnsQuery(), MDNS_PORT, MDNS)
     },
-    close () { for (const s of sockets) try { s.close() } catch {} }
+    close () { for (const s of sockets) s.close() }
   }
 }
 

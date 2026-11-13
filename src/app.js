@@ -141,7 +141,7 @@ async function online () {
     const { Peer } = await import('./index.js')
     let seed = null
     try { seed = localStorage.getItem('corvax.seed') } catch {}
-    me = window.corvax = await Peer.create({ seed, allowPrivate: local })
+    me = window.corvax = await Peer.create({ seed, allowPrivate: local, local: !!app.useLocal })   // useLocal: a CORVAX node on this device
     try { localStorage.setItem('corvax.seed', me.seed) } catch {}
     await me.publish(app.name ? { n: app.name } : {})
     app.live = true; save()
@@ -231,6 +231,7 @@ function home () {
     h('h2', {}, 'Around you'),
     around.length ? peerList(around) : h('p', { class: 'mute small' }, contacts.length ? 'None of your peers have been seen recently.' : 'No peers yet. Share your invite link or add someone in Peers.'),
     contacts.length + app.topics.length > 0 && h('p', { class: 'small mute' }, `${contacts.length} peers · ${app.topics.length} topics · ${app.follows.length} following`),
+    h('label', { class: 'row small mute' }, h('input', { type: 'checkbox', style: 'flex:none', checked: !!app.useLocal, onchange: e => { app.useLocal = e.target.checked; save(); toast(app.useLocal ? 'Uses a CORVAX node on this device from the next start' : 'Local node off') } }), ' Use a CORVAX node on this device (the desktop or Android app)'),
     h('button', { class: 'back', style: 'color:var(--bad);margin-top:2rem', onclick: () => { if (confirm('Forget your identity, peers and messages in this browser?')) { store.clear(); location.reload() } } }, 'Forget my identity'))
 }
 
@@ -380,6 +381,8 @@ await chat.send({ text: 'hello' })`],
   relayFor: true,      // relay for others, within relayLimits
   storage: true,       // store other peers' topic records
   listen: true,        // false: no inbox (presence-only peers)
+  local,               // use a node on this device (127.0.0.1:4799):
+                       //   native: on by default; browsers: true
   RTCPeerConnection    // outside browsers: werift by default
 })`],
   [['me.address', 'me.seed'], 'Your address (52 characters: your public key) and the 64-hex seed that recreates it. Keep the seed secret.',
@@ -393,7 +396,7 @@ const again = await Peer.create({ seed })`],
   [['me.resolve(address, { fresh }?)', '  → Promise<{ address, seq, c, fields } | null>'], 'Looks up a peer’s record (cached for 30 s). c lists its inbox anchors; fields.n is its name.',
 `const record = await me.resolve(address)
 console.log(record?.fields.n?.[0] ?? 'unnamed')`],
-  [['me.send(address, body) → Promise', 'me.on(fn) → off()'], 'Sends a small JSON message (≤ 4 KB sealed) through the recipient’s inbox anchors: end-to-end encrypted, signed, best effort, kept for at most 2 minutes.',
+  [['me.send(address, body) → Promise', 'me.on(fn) → off()'], 'Sends a small JSON message (≤ 16 KB sealed) through the recipient’s inbox anchors: end-to-end encrypted, signed, best effort, kept for at most 2 minutes.',
 `const off = me.on(({ from, body }) => {
   console.log(from, body)
 })
@@ -434,6 +437,11 @@ await me.close()`],
   [['me.anchors() → string', 'me.addAnchors(text) → number'], 'The anchor lines this peer would share; add anchor lines found in any text.',
 `const res = await fetch(anchorListUrl)
 me.addAnchors(await res.text())`],
+  [['joinRoom(config, roomId)', '  from @sloev/trystero-corvax'], 'Trystero rooms signalled over CORVAX, with no relay server: members are found by presence, and signals take the room’s own mesh when they can, so a room keeps re-signalling with no anchor at all.',
+`import { joinRoom } from '@sloev/trystero-corvax'
+
+const room = joinRoom({ appId: 'my-app' }, 'lobby')
+room.onPeerJoin(({ peerId }) => console.log(peerId))`],
   [['Errors'], 'Failures are CorvaxError with a code: no-anchor, not-found, timeout, no-answer, ice-failed, no-relay, busy, no-storage, not-published, too-large, rate-limited, no-webrtc, unsupported, closed.',
 `try {
   await me.connect(address)
