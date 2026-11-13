@@ -58,7 +58,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 | 4 | here | Host interface: `anchor.js` / `node.js` / `lan.js` free of Node APIs; `host-node.js` | ✅ |
 | 5 | here | Local node: apps find `127.0.0.1:4799` (native by default, browsers `local: true`), never shared; loopback allowed on https pages | ✅ |
 | 6 | here | SPEC §10–12, README, DOX, release job publishes the transport; `dist/corvax-node.min.js` (70 KB) for app hosts | ✅ (the transport's first npm version is published by hand) |
-| 7 | corvax-native | Desktop app (Tauri v2): the core in a hidden webview, Rust host (UDP, HTTP long polls, WebSocket, kv, DNS), tray, autostart, App Nap off; ≤ 8 MB | sketched; the shared JS host (`host-bridge.js`) is tested against a simulated native side |
+| 7 | corvax-native | Desktop app (Tauri v2): the core in a hidden webview, Rust host (UDP, HTTP long polls, WebSocket, kv, DNS), tray, autostart, App Nap off; ≤ 8 MB | ✅ built on Linux: **4.6 MB**; run headless, it serves the node and other CORVAX apps use it as their local node. macOS/Windows not yet built |
 | 8 | corvax-native | Android app: foreground service (`connectedDevice`) with a headless WebView, Kotlin host, BLE (KRPC as `ble:<id>`) + Wi-Fi Direct; APK ≤ 6 MB; GitHub + F-Droid | sketched (not built: no Android SDK here) |
 | 9 | upstream | Trystero issue with design and numbers, then a PR as the maintainer prefers | after 2 releases of the transport |
 
@@ -76,4 +76,4 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 - [ ] Firefox and WebKit (CI, run by hand), real Safari
 - [ ] Two browsers on two real networks
 - [ ] A live run on the Mainline DHT (needs outbound UDP)
-- [ ] Apps (corvax-native): build, 24 h background test on Android, offline mesh between two phones
+- [ ] Apps ([corvax-native](https://github.com/sloev/corvax-native)): desktop on macOS and Windows; Android build, 24 h background test, offline mesh between two phones
