@@ -18,5 +18,5 @@ new_sqlite_classes = ["Anchor"]
 
 [[rules]]
 type = "Data"
-globs = ["**/*.ico"]
+globs = ["**/*.ico", "**/*.png"]
 fallthrough = true

@@ -1,6 +1,6 @@
 // Peer services for native runtimes: the cx_* query handlers, inboxes, topic storage and the HTTP server.
 // Every native peer runs the same code; being publicly reachable (an anchor) only decides who can use it.
-//   HTTP  GET /  homepage + anchor list · POST /krpc · GET /cx/*.js (library, app.js) · GET /favicon.ico
+//   HTTP  GET /  homepage + anchor list · POST /krpc · GET /cx/*.js (library, app.js) · GET /favicon.ico, /og.png
 // Anchors are trusted with nothing: records are signed and messages end-to-end encrypted.
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
@@ -168,6 +168,7 @@ export function httpServer (node) {
         return res.end(homepage({ origin, line: node.line() || `(not an anchor) ${node.key}`, anchor: !!node.line(), services: node.services(), uptime: Date.now() - node.started, anchors: node.listing(), stats: stats(node, { inboxes: node.inboxes, store: node.store, bridges: node.peer?.bridges, extra: { dht: node.dht.nodes.size } }) }))
       }
       if (path === '/favicon.ico') return send(res, new URL('favicon.ico', logoDir), 'image/x-icon', true)
+      if (path === '/og.png') return send(res, new URL('corvax-256.png', logoDir), 'image/png', true)
       if (/^\/cx\/[a-z]+\.js$/.test(path)) return send(res, new URL(path.slice(4), srcDir), 'text/javascript; charset=utf-8')
       res.statusCode = 404; res.end()
     } catch { if (!res.headersSent) res.statusCode = 400; res.end() }

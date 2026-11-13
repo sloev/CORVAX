@@ -12,6 +12,7 @@ import { pack, unpack, verifyBeacon } from '../src/record.js'
 import { serveSocket } from '../src/relay.js'
 import { hex, unhex, utf8, str, z32, unz32, equal, readCapped } from '../src/bytes.js'
 import favicon from '../assets/logo/favicon.ico'
+import og from '../assets/logo/corvax-256.png'
 
 const RELAY = 'https://relay.pkarr.org', CORS = { 'access-control-allow-origin': '*' }
 // WebSocket relaying is a last resort here: few, slow sessions and a small hourly budget.
@@ -26,7 +27,9 @@ export default {
       const r = await env.ASSETS.fetch(new URL(pathname.slice(3), req.url))
       return new Response(r.body, { status: r.status, headers: { ...Object.fromEntries(r.headers), ...CORS } })
     }
-    if (pathname === '/favicon.ico') return new Response(favicon, { headers: { 'content-type': 'image/x-icon', 'cache-control': 'public, max-age=31536000, immutable' } })
+    const year = 'public, max-age=31536000, immutable'
+    if (pathname === '/favicon.ico') return new Response(favicon, { headers: { 'content-type': 'image/x-icon', 'cache-control': year } })
+    if (pathname === '/og.png') return new Response(og, { headers: { 'content-type': 'image/png', 'cache-control': year } })
     return env.ANCHOR.get(env.ANCHOR.idFromName('anchor')).fetch(req)
   }
 }

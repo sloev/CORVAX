@@ -83,7 +83,7 @@ test('homepage: tiny shell + app.js for browsers, plain anchor list for everythi
   assert.deepEqual(Object.keys(st).sort(), ['dht', 'messages', 'peers', 'records', 'relays', 'topics'])
   const scripts = [...html.matchAll(/<script[^>]*>/g)].map(m => m[0])
   assert.deepEqual(scripts, ['<script type="module" src="/cx/app.js">'], 'exactly one script: the same-origin app')
-  assert.ok(!/(src|href)="https?:/i.test(html), 'no external requests')
+  assert.ok(!/src="https?:|<link[^>]+href="https?:/i.test(html), 'no external requests (plain links are fine)')
   assert.ok(html.indexOf('/cx/app.js') < html.indexOf('<pre id="anchors">'), 'anchor list comes after the script tag')
   assert.ok(html.match(LINE_RE).every(l => parseLine(l)), 'everything that greps as an anchor line is valid')
 
@@ -92,6 +92,8 @@ test('homepage: tiny shell + app.js for browsers, plain anchor list for everythi
   const js = await app.text()
   assert.match(js, /const LOGO = 'data:image\/png;base64,iVBOR/, 'logo inlined')
   assert.ok(!/https?:\/\/(?!github\.com|cdn\.jsdelivr\.net\/npm\/@sloev\/corvax@0\.1\/)/.test(js.replace(/\$\{node\.origin\}/g, '')), 'app makes no external requests (the CDN URL is shown, never loaded)')
+  assert.match((await fetch(base + '/og.png')).headers.get('content-type'), /image\/png/, 'social preview image')
+  assert.match(html, /og:image" content="http:\/\/[^"]+\/og\.png"/)
   assert.equal((await fetch(base + '/logo')).status, 404, '/logo endpoint removed')
   assert.equal((await fetch(base + '/demo')).status, 404, '/demo endpoint removed (the homepage is the demo)')
 

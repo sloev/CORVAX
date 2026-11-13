@@ -18,7 +18,8 @@
     "src",
     "dist",
     "bin",
-    "assets/logo/favicon.ico"
+    "assets/logo/favicon.ico",
+    "assets/logo/corvax-256.png"
   ],
   "engines": {
     "node": ">=22"

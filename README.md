@@ -1,13 +1,21 @@
 <p align="center"><img src="assets/logo/corvax-256.png" width="160" alt="CORVAX logo"></p>
+<p align="center"><a href="https://corvax.sloev.workers.dev">Homepage</a> · <a href="https://www.npmjs.com/package/@sloev/corvax">npm</a> · <a href="https://buymeacoffee.com/sloev">Buy me a coffee ☕</a></p>
 
 # CORVAX
 
 Find any peer by its key or by a topic, from any runtime, and open an encrypted WebRTC DataChannel to it: direct when possible, otherwise relayed through another peer.
 
 - **Addresses are keys** (Ed25519, 52 chars). Nothing to register, and they never expire.
-- **No central servers.** Anchors are ordinary peers that others can reach; anyone can run one, and none is trusted.
+- **No central server required.** Anchors are ordinary peers that others can reach; anyone can run one, none is trusted, and they only introduce peers (never in the data path).
 - **Topics:** leased, signed presence plus short best-effort broadcasts.
 - **Zero runtime dependencies, no build step.** Runs in browsers, Node ≥ 22, Bun and Deno.
+
+```mermaid
+flowchart LR
+    A[Peer A] -. find + signal .-> N[Anchor]
+    B[Peer B] -. find + signal .-> N
+    A <== "WebRTC DataChannel (direct, or relayed by a peer)" ==> B
+```
 
 ## Use
 

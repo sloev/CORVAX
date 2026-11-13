@@ -92,6 +92,8 @@ article{line-height:1.6}article .lead{font-size:1.1rem}article h2{margin-top:2.6
 pre.code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12.5px;line-height:1.55;padding:.9rem 1rem .9rem .6rem}pre.code code{word-break:normal}pre.code .ln{display:block}
 @media (max-width:480px){pre.code{font-size:11.5px}}
 pre.lines{white-space:pre-wrap;word-break:break-all}
+figure.diagram{margin:1.2rem auto;max-width:420px;color:var(--fg)}figure.diagram svg{display:block;width:100%;height:auto;font-family:inherit}
+a{color:var(--accent)}footer{margin:3rem 0 1.5rem;padding-top:1rem;border-top:1px solid var(--line);text-align:center;color:var(--mute);font-size:.9rem}footer a{color:inherit}
 .ref{margin:1.6rem 0;padding-top:1.6rem;border-top:1px solid var(--line)}.ref h4{margin:0 0 .6rem;font-weight:600}
 .ref h4 code{display:block;font-size:.88rem;word-break:normal;overflow-wrap:anywhere;white-space:pre-wrap}.ref p{margin:.4rem 0 .9rem;color:var(--mute)}
 .hl0{color:var(--mute);font-style:italic}.hl1{color:var(--str)}.hl2,.hl4{color:var(--kw)}.hl3{color:var(--num)}
@@ -100,7 +102,9 @@ pre.lines{white-space:pre-wrap;word-break:break-all}
 `))
 const main = h('main')
 const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'View' })
-document.body.prepend(h('header', {}, h('img', { src: LOGO, alt: '' }), h('span', { class: 'wordmark', role: 'img', 'aria-label': 'CORVAX', style: `--wm:url(${WORDMARK})` }), seg), main, h('div', { id: 'toast', role: 'status' }))
+document.body.prepend(h('header', {}, h('img', { src: LOGO, alt: '' }), h('span', { class: 'wordmark', role: 'img', 'aria-label': 'CORVAX', style: `--wm:url(${WORDMARK})` }), seg), main,
+  h('footer', {}, Object.entries(JSON.parse(node.links || '{}')).flatMap(([label, href], i) => [i ? ' · ' : '', h('a', { href }, label)])),
+  h('div', { id: 'toast', role: 'status' }))
 anchors.hidden = true
 let toastTimer
 function toast (text, bad = false) {
@@ -394,7 +398,7 @@ console.log(record?.fields.n?.[0] ?? 'unnamed')`],
   console.log(from, body)
 })
 await me.send(address, { hello: 'there' })`],
-  [['me.accept(fn) → off()', 'me.connect(address, { timeout, relay }?)', '  → Promise<{ channel, kind, via? }>'], 'Opens a WebRTC DataChannel: direct when possible, otherwise relayed by another peer (kind "peer", still end-to-end encrypted). The other side must call accept.',
+  [['me.accept(fn) → off()', 'me.connect(address, { timeout, relay }?)', '  → Promise<{ channel, kind, via? }>'], 'Opens a WebRTC DataChannel: direct when possible, otherwise relayed by another peer (kind "peer", still end-to-end encrypted). The other side must call accept. A direct connection reveals your IP address to that peer.',
 `// on the receiving side
 me.accept(({ from, channel }) => {
   channel.onmessage = e => channel.send('echo: ' + e.data)
@@ -458,11 +462,21 @@ function code (text) {
   })))
 }
 
+// How it works, as a picture: anchors introduce, peers talk directly. Inline SVG in the page's colours.
+const DIAGRAM = `<svg viewBox="0 0 320 128" role="img" aria-label="Peers find and signal each other through an anchor, then talk directly over WebRTC">
+<g fill="none" stroke="currentColor" stroke-width="1.2"><rect x="115" y="6" width="90" height="28" rx="8"/><rect x="8" y="92" width="92" height="28" rx="8"/><rect x="220" y="92" width="92" height="28" rx="8"/>
+<path d="M54 92 L140 34 M266 92 L180 34" stroke-dasharray="4 4" opacity=".6"/><path d="M100 106 H220" stroke="var(--accent)" stroke-width="2"/></g>
+<g fill="currentColor" font-size="11" text-anchor="middle"><text x="160" y="24">Anchor</text><text x="54" y="110">Peer A</text><text x="266" y="110">Peer B</text>
+<text x="160" y="64" font-size="9.5" opacity=".7">find + signal</text><text x="160" y="100" font-size="9.5" fill="var(--accent)">WebRTC DataChannel</text>
+<text x="160" y="122" font-size="9" opacity=".7">direct, or relayed by a peer</text></g></svg>`
+function diagram () { const f = h('figure', { class: 'diagram' }); f.innerHTML = DIAGRAM; return f }
+
 function dox () {
   return h('article', {},
     live(),
-    h('p', { class: 'lead' }, 'CORVAX lets people and programs find each other by a key or a topic and talk directly, with no account and no central server.'),
-    h('ul', {}, ['Your address is a key made in your browser. Nothing to sign up for.', 'Messages are end-to-end encrypted; connections are direct WebRTC, or relayed by another peer.', 'Anchors only introduce peers. Anyone can run one.'].map(t => h('li', {}, t))),
+    h('p', { class: 'lead' }, 'CORVAX lets people and programs find each other by a key or a topic and talk directly. No account, and no central server required.'),
+    h('ul', {}, ['Your address is a key made in your browser. Nothing to sign up for.', 'Messages are end-to-end encrypted; connections are direct WebRTC, or relayed by another peer.', 'Anchors only introduce peers; they are ordinary peers anyone can run, never in the data path.'].map(t => h('li', {}, t))),
+    diagram(),
     h('p', {}, h('button', { class: 'btn primary', onclick: () => { ui.view = 'app'; store.set('corvax.view', 'app'); render() } }, 'Try it'), ' or build with it.'),
     h('h2', {}, 'Example: a live visitor counter'),
     h('p', {}, 'A whole page. Save it as an .html file and open it in two tabs: no server, no account. The count at the top of this page is the same call.'),
