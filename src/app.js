@@ -343,7 +343,7 @@ function chat (a) {
 // The one way to load CORVAX in a browser, used in every doc: the newest 0.1.x release from npm, minified.
 const CDN = 'https://cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js'
 // The apps (sloev/corvax-native): every release has the same file names, so these links always get the newest.
-const DL = 'https://github.com/sloev/corvax-native/releases/latest/'
+const DL = 'https://github.com/sloev/corvax-native/releases/latest'
 const APPS = [
   ['Windows', 'CORVAX_0.1.0_x64-setup.exe', 'installer, 1.6 MB'],
   ['macOS', 'CORVAX_0.1.0_universal.dmg', 'Apple silicon and Intel, 6.8 MB'],
@@ -499,7 +499,7 @@ function dox () {
     code(EXAMPLE),
     h('h2', {}, 'Apps: a CORVAX node on your device'),
     h('p', {}, 'Runs a node in the background (tray icon or notification) and shows this app in a window. Other apps and browser tabs on the device use it automatically as their local node. Small: 1.6–7 MB.'),
-    h('ul', { class: 'apps' }, APPS.map(([os, file, note]) => h('li', {}, h('a', { href: DL + 'download/' + file }, os), ' ', h('span', { class: 'mute small' }, note)))),
+    h('ul', { class: 'apps' }, APPS.map(([os, file, note]) => h('li', {}, h('a', { href: `${DL}/download/${file}` }, os), ' ', h('span', { class: 'mute small' }, note)))),
     h('p', { class: 'small mute' }, 'Unsigned for now: on macOS right-click → Open the first time; on Windows choose “More info” → “Run anyway”. ', h('a', { href: DL }, 'All downloads'), ' · ', h('a', { href: 'https://github.com/sloev/corvax-native' }, 'source')),
     h('h2', {}, 'Use with Trystero'),
     h('p', {}, 'Trystero rooms can signal over CORVAX instead of a relay server: members are found by CORVAX presence, and signals take the room’s own mesh when they can.'),
