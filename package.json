@@ -25,7 +25,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "esbuild src/index.js --bundle --minify --format=esm --platform=neutral --legal-comments=none --outfile=dist/corvax.min.js --banner:js=\"/*! CORVAX v${CORVAX_VERSION:-$npm_package_version} | MIT | github.com/sloev/corvax */\"",
+    "build": "esbuild src/index.js --bundle --minify --format=esm --platform=neutral --legal-comments=none --outfile=dist/corvax.min.js --banner:js=\"/*! CORVAX v${CORVAX_VERSION:-$npm_package_version} | MIT | github.com/sloev/corvax */\" && esbuild src/node.js --bundle --minify --format=esm --platform=neutral --legal-comments=none --outfile=dist/corvax-node.min.js --banner:js=\"/*! CORVAX node v${CORVAX_VERSION:-$npm_package_version} (bring your own host: SPEC \u00a711) | MIT */\"",
     "test": "node --test --test-concurrency=1 --test-force-exit test/*.test.js"
   },
   "license": "MIT",

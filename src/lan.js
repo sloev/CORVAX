@@ -5,7 +5,8 @@ const GROUP = '239.255.42.99', MDNS = '224.0.0.251', MDNS_PORT = 5353, NAME = '_
 const te = new TextEncoder(), td = new TextDecoder()
 
 export async function startLan ({ io, port = 4798, mdns = true, lines, onFound }) {
-  io ||= (await import('./host-node.js')).default
+  const NODE_HOST = './host-node.js'
+  io ||= (await import(NODE_HOST)).default
   const sockets = []
   const open = async (p, group, onMsg) => {
     const s = await io.udp({ port: p, reuse: true, group, broadcast: true }, (b, r) => s && onMsg(s, b, r))

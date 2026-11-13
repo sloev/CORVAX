@@ -35,3 +35,13 @@ test('bundle: same exports; two browser peers connect with it', { skip: !existsS
     return new Promise(resolve => { channel.onmessage = e => resolve(e.data); channel.send('hi') })
   }, to), 'echo hi')
 })
+
+test('node bundle: an app host runs the whole node from dist/corvax-node.min.js', { skip: !existsSync(new URL('../dist/corvax-node.min.js', import.meta.url)) && 'run npm run build first' }, async t => {
+  const { start } = await import('../dist/corvax-node.min.js')
+  const io = (await import('../src/host-node.js')).default                 // stands in for a desktop or Android host
+  const { mkdtemp } = await import('node:fs/promises'), { tmpdir } = await import('node:os'), { join } = await import('node:path')
+  const n = await start({ io, port: 0, host: '127.0.0.1', anchor: 'force', lan: false, dir: await mkdtemp(join(tmpdir(), 'corvax-')), allowPrivate: true, fallback: [] })
+  t.after(() => n.close())
+  assert.match(await (await fetch(`http://127.0.0.1:${n.port}/`)).text(), /^corvax-anchor:/)
+  assert.match(await (await fetch(`http://127.0.0.1:${n.port}/cx/app.js`)).text(), /DOX/)
+})

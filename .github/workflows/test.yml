@@ -66,7 +66,7 @@ jobs:
         run: |
           git tag "v$V"; git tag -f latest
           git push origin "v$V"; git push -f origin latest
-          gh release create "v$V" dist/corvax.min.js "sloev-corvax-$V.tgz" --title "v$V" --latest \
+          gh release create "v$V" dist/corvax.min.js dist/corvax-node.min.js "sloev-corvax-$V.tgz" --title "v$V" --latest \
             --notes "npm i @sloev/corvax@$V · import { Peer } from 'https://cdn.jsdelivr.net/npm/@sloev/corvax@$V/dist/corvax.min.js'"
           gh release list --limit 100 --json tagName,createdAt -q 'sort_by(.createdAt) | reverse | .[10:][].tagName' |
             xargs -r -n1 gh release delete --yes --cleanup-tag

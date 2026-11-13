@@ -12,6 +12,8 @@ import { isStun, stunReply } from './stun.js'
 import { TopicStore } from './store.js'
 import { hex, unhex, utf8, str, z32, unz32 } from './bytes.js'
 
+const NODE_HOST = './host-node.js'          // a variable, so bundles for app webviews leave Node's host out
+
 export async function start (o = {}) {
   const node = new CorvaxNode(o)
   await node.start()
@@ -48,7 +50,7 @@ class CorvaxNode {
   async start () {
     const o = this.o, log = o.log
     this.started = Date.now()
-    this.io = o.io || (await import('./host-node.js')).default
+    this.io = o.io || (await import(NODE_HOST)).default
     this.kv = this.io.kv(o.dir)
     this.id = await identity(o.seed ? (typeof o.seed === 'string' ? unhex(o.seed) : o.seed) : await this.#seed())
     this.key = z32(this.id.pub)
