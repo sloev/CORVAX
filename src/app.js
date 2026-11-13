@@ -338,51 +338,30 @@ function chat (a) {
 // The one way to load CORVAX in a browser, used in every doc: the newest 0.1.x release from npm, minified.
 const CDN = 'https://cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js'
 // The one example on DOX: a complete page with a live visitor counter, like the one at the top.
-const EXAMPLE = `<!doctype html>
-<meta charset="utf-8">
-<p><b id="count">…</b> people here now</p>
+const EXAMPLE = `<p><b id="count">…</b> people here now</p>
 
 <script type="module">
-  import { Peer } from
+  import { presence } from
     '${CDN}'
 
-  // One key per tab: a reload is the same visitor.
-  const seed = sessionStorage.getItem('corvax-seed')
-  const me = await Peer.create({
-    seed,
-    listen: false,   // presence only: no inbox,
-    storage: false,  // no storing for others,
-    relayFor: false  // no relaying
-  })
-  sessionStorage.setItem('corvax-seed', me.seed)
-
-  // Everyone on this page joins the same topic.
-  const page = location.host + location.pathname
-  const room = await me.topic(page)
-  const others = new Set()
-  const count = document.getElementById('count')
-  const show = () => count.textContent = others.size + 1
-
-  room.subscribe({
-    presence: ({ address, presence }) => {
-      if (presence === 'recent') others.add(address)
-      else others.delete(address)
-      show()
-    }
-  })
-
-  // A 2-minute lease, renewed automatically,
-  // withdrawn at once when the tab hides or closes.
-  const lease = { beacon: false, lease: 120e3 }
-  const join = () => room.publish(lease)
-  await join()
-  show()
-  document.onvisibilitychange = () =>
-    document.hidden ? room.unpublish() : join()
+  presence(n => count.textContent = n)
 </script>`
 
-// [signatures (one per line), what it does, example]. The whole public JS API; SPEC.md has the wire protocol.
+// [signatures (one per line), what it does, example]. The whole public JS API, helpers first; SPEC.md has the wire protocol.
 const API = [
+  [['presence(onCount, { topic, lease }?)', '  → Promise<{ count, peers, leave() }>'], 'A live count of the peers on a topic (default: this page), you included. onCount runs on every change, within about 2 s. Presence only: a 2-minute lease, a per-tab key (a reload is the same visitor), no inbox and no WebRTC between peers. Hidden or closed tabs leave at once. Other options go to Peer.create.',
+`const here = await presence(n => {
+  count.textContent = n
+})
+
+console.log(here.count, here.peers)
+await here.leave()`],
+  [['room(name, onMessage, options?)', '  → Promise<{ send(body), leave() }>'], 'Everyone in the room gets everyone’s messages: JSON up to 1 KB, best effort, at most 10 per minute per sender, never stored. Members link over WebRTC, so they see each other’s IP.',
+`const chat = await room('my-chat', (body, from) => {
+  console.log(from.slice(0, 6), body.text)
+})
+
+await chat.send({ text: 'hello' })`],
   [['Peer.create(options?) → Promise<Peer>'], 'Creates an identity (or restores one from a seed), finds anchors and starts listening for messages. Every option is optional.',
 `const me = await Peer.create({
   seed,                // 64 hex chars; omit for a new identity
@@ -457,7 +436,7 @@ me.addAnchors(await res.text())`],
 } catch (e) {
   if (e.code === 'not-found') console.log('not published')
 }`],
-  [['Other exports'], 'identity(seed?), z32 / unz32 (address ⇄ key), normalize / topicId (topic names), parseLine / formatLine / Book (anchor lines), DHT (sans-IO Mainline KRPC).',
+  [['Other exports'], 'Peer, the helpers presence and room, identity(seed?), z32 / unz32 (address ⇄ key), normalize / topicId (topic names), parseLine / formatLine / Book (anchor lines), DHT (sans-IO Mainline KRPC).',
 `import { normalize, topicId } from '@sloev/corvax'
 
 normalize('  Chess ')   // 'chess'`]
@@ -486,7 +465,7 @@ function dox () {
     h('ul', {}, ['Your address is a key made in your browser. Nothing to sign up for.', 'Messages are end-to-end encrypted; connections are direct WebRTC, or relayed by another peer.', 'Anchors only introduce peers. Anyone can run one.'].map(t => h('li', {}, t))),
     h('p', {}, h('button', { class: 'btn primary', onclick: () => { ui.view = 'app'; store.set('corvax.view', 'app'); render() } }, 'Try it'), ' or build with it.'),
     h('h2', {}, 'Example: a live visitor counter'),
-    h('p', {}, 'A whole page. Save it as an .html file and open it in two tabs. No server or account; the count at the top of this page works the same way.'),
+    h('p', {}, 'A whole page. Save it as an .html file and open it in two tabs: no server, no account. The count at the top of this page is the same call.'),
     code(EXAMPLE),
     h('h2', { id: 'docs' }, 'Technical documentation'),
     h('h3', {}, 'Start'),
@@ -548,23 +527,13 @@ const started = Date.now()
 const since = s => s < 3600 ? `${Math.floor(s / 60)} min` : s < 86400 ? `${Math.floor(s / 3600)} h` : `${Math.floor(s / 86400)} days`
 
 // ---- live visitors -----------------------------------------------------------------------------
-// The page counts its viewers with CORVAX topic presence: each visible tab holds a 2-minute lease on one topic
-// under a per-tab key (sessionStorage: a reload is the same visitor), with no Beacon, no inbox and no WebRTC links.
-// Hiding or closing the tab withdraws the lease at once (pre-signed, sent with keepalive); a crashed tab lapses in ≤ 2 min.
+// The page counts its viewers with CORVAX itself: presence() on one topic (per-tab key, 2-minute lease, no inbox,
+// no Beacon, no WebRTC links; hiding or closing the tab leaves at once, a crashed tab lapses in ≤ 2 min).
 const VISITORS = 'corvax-worker-home'
 let visitors = null
 async function countVisitors () {
-  const { Peer } = await import('./index.js')
-  let seed = null
-  try { seed = sessionStorage.getItem('corvax.visitor') } catch {}
-  const p = await Peer.create({ seed, allowPrivate: local, storage: false, relayFor: false, listen: false })
-  try { sessionStorage.setItem('corvax.visitor', p.seed) } catch {}
-  const t = await p.topic(VISITORS), here = new Set()
-  t.subscribe({ presence: e => { e.presence === 'recent' ? here.add(e.address) : here.delete(e.address); visitors = here.size + 1; render() } })
-  const join = () => t.publish({ beacon: false, lease: 120e3 })
-  await join()
-  visitors = here.size + 1; render()
-  document.addEventListener('visibilitychange', () => document.hidden ? t.unpublish() : join().catch(() => {}))
+  const { presence } = await import('./index.js')
+  await presence(n => { visitors = n; render() }, { topic: VISITORS, allowPrivate: local })
 }
 const live = () => visitors && h('p', { class: 'small mute live', title: `Counted with CORVAX itself: presence on the topic "${VISITORS}"` }, h('span', { class: 'dot online' }), ` ${visitors} ${visitors === 1 ? 'person' : 'people'} here now`)
 
