@@ -210,6 +210,6 @@ A node's I/O comes from a host; everything else (`node.js`, `anchor.js`, `lan.js
 
 Nearby devices extend the mesh without internet or an access point.
 
-- **BLE:** service `c0a40001-0c0a-4c58-8000-00000000c0a4`; advertisement service data = first 8 bytes of the public key. Characteristic `…0002` (write without response) and `…0003` (notify) carry KRPC (§3) in chunks: `seq (1 B) ‖ flags (1 B: 1 = last) ‖ payload ≤ MTU − 5`; a message is ≤ 16 KB. Used for presence, messages and signalling; bulk data moves to Wi-Fi.
+- **BLE:** service `c0a40001-0c0a-4c58-8000-00000000c0a4`; advertisement service data = first 8 bytes of the public key. Characteristic `…0002` (write without response) and `…0003` (notify) carry KRPC (§3) in chunks: `seq (1 B) ‖ flags (1 B: 1 = last) ‖ payload ≤ MTU − 5`; a message is ≤ 16 KB. Used for presence, messages and signalling; bulk data moves to Wi-Fi. Hosts present a BLE peer to the core as the UDP address `ble:<id>`, so the DHT and every query run over BLE unchanged.
 - **Wi-Fi Direct:** DNS-SD service `_corvax._udp` with one TXT string, the node's anchor line for the group address. Group members then speak UDP, HTTP and WebRTC over the group network.
 - Found peers enter the anchor book as LAN entries (never shared). Offline, nearby nodes answer `get` from the Beacons they hold.

@@ -57,9 +57,9 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 | 3 | here | Tests: stock Trystero rooms (Node + werift; Chromium), join time, recovery with no anchor left | ✅ joined in 0.3 s (Chromium); re-signals over the mesh with the anchor gone |
 | 4 | here | Host interface: `anchor.js` / `node.js` / `lan.js` free of Node APIs; `host-node.js` | ✅ |
 | 5 | here | Local node: apps find `127.0.0.1:4799` (native by default, browsers `local: true`), never shared; loopback allowed on https pages | ✅ |
-| 6 | here | SPEC §10–12, README, DOX, release job publishes the transport | ✅ |
-| 7 | corvax-native | Desktop app (Tauri v2): the core in a hidden webview, Rust host (UDP, HTTP, WebSocket, kv), tray, NODE view; ≤ 8 MB | sketched |
-| 8 | corvax-native | Android app: foreground service (`connectedDevice`) with a headless WebView, Kotlin host, BLE + Wi-Fi Direct + NSD; APK ≤ 6 MB; GitHub + F-Droid | sketched |
+| 6 | here | SPEC §10–12, README, DOX, release job publishes the transport; `dist/corvax-node.min.js` (70 KB) for app hosts | ✅ (the transport's first npm version is published by hand) |
+| 7 | corvax-native | Desktop app (Tauri v2): the core in a hidden webview, Rust host (UDP, HTTP long polls, WebSocket, kv, DNS), tray, autostart, App Nap off; ≤ 8 MB | sketched; the shared JS host (`host-bridge.js`) is tested against a simulated native side |
+| 8 | corvax-native | Android app: foreground service (`connectedDevice`) with a headless WebView, Kotlin host, BLE (KRPC as `ble:<id>`) + Wi-Fi Direct; APK ≤ 6 MB; GitHub + F-Droid | sketched (not built: no Android SDK here) |
 | 9 | upstream | Trystero issue with design and numbers, then a PR as the maintainer prefers | after 2 releases of the transport |
 
 ## Status
