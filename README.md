@@ -49,23 +49,44 @@ A whole page; open it in two tabs. No server or account.
 <!doctype html>
 <meta charset="utf-8">
 <p><b id="count">…</b> people here now</p>
-<script type="module">
-  import { Peer } from 'https://cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js'
 
-  // One key per tab, so a reload stays the same visitor. Presence only: no inbox, no storage, no relaying.
+<script type="module">
+  import { Peer } from
+    'https://cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js'
+
+  // One key per tab: a reload is the same visitor.
   const seed = sessionStorage.getItem('corvax-seed')
-  const me = await Peer.create({ seed, listen: false, storage: false, relayFor: false })
+  const me = await Peer.create({
+    seed,
+    listen: false,   // presence only: no inbox,
+    storage: false,  // no storing for others,
+    relayFor: false  // no relaying
+  })
   sessionStorage.setItem('corvax-seed', me.seed)
 
-  // Everyone on this page joins the same topic and watches who else is there.
-  const room = await me.topic(location.host + location.pathname), others = new Set()
-  const show = () => document.getElementById('count').textContent = others.size + 1
-  room.subscribe({ presence: e => { e.presence === 'recent' ? others.add(e.address) : others.delete(e.address); show() } })
+  // Everyone on this page joins the same topic.
+  const page = location.host + location.pathname
+  const room = await me.topic(page)
+  const others = new Set()
+  const count = document.getElementById('count')
+  const show = () => count.textContent = others.size + 1
 
-  // A 2-minute lease, renewed automatically; withdrawn when the tab hides or closes.
-  const join = () => room.publish({ beacon: false, lease: 120e3 })
-  await join(); show()
-  document.addEventListener('visibilitychange', () => document.hidden ? room.unpublish() : join())
+  room.subscribe({
+    presence: ({ address, presence }) => {
+      if (presence === 'recent') others.add(address)
+      else others.delete(address)
+      show()
+    }
+  })
+
+  // A 2-minute lease, renewed automatically,
+  // withdrawn at once when the tab hides or closes.
+  const lease = { beacon: false, lease: 120e3 }
+  const join = () => room.publish(lease)
+  await join()
+  show()
+  document.onvisibilitychange = () =>
+    document.hidden ? room.unpublish() : join()
 </script>
 ```
 

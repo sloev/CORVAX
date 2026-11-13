@@ -49,8 +49,8 @@ const dot = p => h('span', { class: `dot ${p}`, title: LABEL[p] })
 
 // ---- layout -----------------------------------------------------------------------------------
 document.head.append(h('style', {}, `
-:root{--fg:#17181c;--bg:#fcfbf8;--mute:#6b6e78;--line:#e7e4dc;--soft:#f3f1ea;--accent:#2f4b9a;--on:#fff;--ok:#2e9d5b;--warn:#c9922b;--bad:#c4473a}
-@media (prefers-color-scheme:dark){:root{--fg:#ecebe7;--bg:#121317;--mute:#9a9ca6;--line:#2a2c33;--soft:#1b1d22;--accent:#8ea8ff;--on:#0e1220}}
+:root{--kw:#7a3bb0;--str:#2f7a3d;--num:#b0560f;--fg:#17181c;--bg:#fcfbf8;--mute:#6b6e78;--line:#e7e4dc;--soft:#f3f1ea;--accent:#2f4b9a;--on:#fff;--ok:#2e9d5b;--warn:#c9922b;--bad:#c4473a}
+@media (prefers-color-scheme:dark){:root{--kw:#c9a6ff;--str:#94d6a4;--num:#f2b878;--fg:#ecebe7;--bg:#121317;--mute:#9a9ca6;--line:#2a2c33;--soft:#1b1d22;--accent:#8ea8ff;--on:#0e1220}}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
 body{margin:0 auto;max-width:40rem;padding:1.25rem 1rem 4rem;font:16px/1.5 system-ui,sans-serif;color:var(--fg);background:var(--bg)}
 header{display:flex;align-items:center;gap:.9rem;margin-bottom:1.4rem}
@@ -87,7 +87,14 @@ pre{font:13px/1.5 ui-monospace,monospace;background:var(--soft);border-radius:10
 .back{border:0;background:none;color:var(--accent);padding:0;margin:.5rem 0}
 #toast{position:fixed;left:50%;bottom:1.2rem;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:.5rem 1rem;border-radius:10px;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.show{opacity:1}#toast.bad{background:var(--bad);color:#fff}
-.live{display:flex;align-items:center;gap:.4rem;margin:0 0 .5rem}article .lead{font-size:1.1rem}.ref h4{margin:1.4rem 0 .2rem;font-weight:600}.ref h4 code{font-size:.9rem}.ref p{margin:.2rem 0 .4rem}
+.live{display:flex;align-items:center;gap:.4rem;margin:0 0 .5rem}
+article{line-height:1.6}article .lead{font-size:1.1rem}article h2{margin-top:2.6rem}article h3{margin-top:2rem}
+pre.code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12.5px;line-height:1.55;padding:.9rem 1rem .9rem .6rem}pre.code code{word-break:normal}pre.code .ln{display:block}
+@media (max-width:480px){pre.code{font-size:11.5px}}
+pre.lines{white-space:pre-wrap;word-break:break-all}
+.ref{margin:1.6rem 0;padding-top:1.6rem;border-top:1px solid var(--line)}.ref h4{margin:0 0 .6rem;font-weight:600}
+.ref h4 code{display:block;font-size:.88rem;word-break:normal;overflow-wrap:anywhere;white-space:pre-wrap}.ref p{margin:.4rem 0 .9rem;color:var(--mute)}
+.hl0{color:var(--mute);font-style:italic}.hl1{color:var(--str)}.hl2,.hl4{color:var(--kw)}.hl3{color:var(--num)}
 @media (max-width:480px){header{gap:.6rem}header img{width:64px;height:64px}header .wordmark{height:26px}.seg button{padding:.3rem .6rem;font-size:.85rem}}
 @media (max-width:360px){header .wordmark{visibility:hidden}nav button{font-size:.78rem;min-width:0;overflow:hidden;text-overflow:ellipsis}}
 `))
@@ -334,79 +341,144 @@ const CDN = 'https://cdn.jsdelivr.net/npm/@sloev/corvax@0.1/dist/corvax.min.js'
 const EXAMPLE = `<!doctype html>
 <meta charset="utf-8">
 <p><b id="count">…</b> people here now</p>
-<script type="module">
-  import { Peer } from '${CDN}'
 
-  // One key per tab, so a reload stays the same visitor. Presence only: no inbox, no storage, no relaying.
+<script type="module">
+  import { Peer } from
+    '${CDN}'
+
+  // One key per tab: a reload is the same visitor.
   const seed = sessionStorage.getItem('corvax-seed')
-  const me = await Peer.create({ seed, listen: false, storage: false, relayFor: false })
+  const me = await Peer.create({
+    seed,
+    listen: false,   // presence only: no inbox,
+    storage: false,  // no storing for others,
+    relayFor: false  // no relaying
+  })
   sessionStorage.setItem('corvax-seed', me.seed)
 
-  // Everyone on this page joins the same topic and watches who else is there.
-  const room = await me.topic(location.host + location.pathname), others = new Set()
-  const show = () => document.getElementById('count').textContent = others.size + 1
-  room.subscribe({ presence: e => { e.presence === 'recent' ? others.add(e.address) : others.delete(e.address); show() } })
+  // Everyone on this page joins the same topic.
+  const page = location.host + location.pathname
+  const room = await me.topic(page)
+  const others = new Set()
+  const count = document.getElementById('count')
+  const show = () => count.textContent = others.size + 1
 
-  // A 2-minute lease, renewed automatically; withdrawn when the tab hides or closes.
-  const join = () => room.publish({ beacon: false, lease: 120e3 })
-  await join(); show()
-  document.addEventListener('visibilitychange', () => document.hidden ? room.unpublish() : join())
+  room.subscribe({
+    presence: ({ address, presence }) => {
+      if (presence === 'recent') others.add(address)
+      else others.delete(address)
+      show()
+    }
+  })
+
+  // A 2-minute lease, renewed automatically,
+  // withdrawn at once when the tab hides or closes.
+  const lease = { beacon: false, lease: 120e3 }
+  const join = () => room.publish(lease)
+  await join()
+  show()
+  document.onvisibilitychange = () =>
+    document.hidden ? room.unpublish() : join()
 </script>`
-// [signature, what it does, example]. The whole public JS API; SPEC.md has the wire protocol.
+
+// [signatures (one per line), what it does, example]. The whole public JS API; SPEC.md has the wire protocol.
 const API = [
-  ['Peer.create(options?) → Promise<Peer>', 'Creates an identity (or restores one from seed), finds anchors and starts listening for messages. Every option is optional.',
+  [['Peer.create(options?) → Promise<Peer>'], 'Creates an identity (or restores one from a seed), finds anchors and starts listening for messages. Every option is optional.',
 `const me = await Peer.create({
-  seed,                 // 64 hex chars or 32 bytes; omit for a new identity (me.seed)
-  anchors: '',          // anchor lines to try first (any text; lines are grepped out)
-  sources: [],          // URLs whose text holds anchor lines
-  dohDomains: [],       // domains with _corvax-anchors TXT records (DNS over HTTPS)
-  fallback,             // URLs tried when nothing else answers (default: the public anchor)
-  allowPrivate: false,  // accept anchors on private addresses (LAN, tests)
+  seed,                // 64 hex chars; omit for a new identity
+  anchors: '',         // anchor lines to try first (any text)
+  sources: [],         // URLs whose text holds anchor lines
+  dohDomains: [],      // domains with _corvax-anchors TXT records
+  fallback,            // tried when nothing else answers
+                       //   (default: the public anchor)
+  allowPrivate: false, // accept anchors on LAN addresses
   stun: ['stun:stun.cloudflare.com:3478'],
-  relay: 'fallback',    // 'fallback': relay through a peer when direct fails; 'never'
-  relayFor: true,       // relay for others (bounded by relayLimits { sessions, kbps })
-  storage: true,        // store other peers' topic records
-  listen: true,         // false: no inbox (for presence-only peers, e.g. counters)
-  RTCPeerConnection,    // outside browsers: defaults to werift
+  relay: 'fallback',   // relay via a peer if direct fails; 'never'
+  relayFor: true,      // relay for others, within relayLimits
+  storage: true,       // store other peers' topic records
+  listen: true,        // false: no inbox (presence-only peers)
+  RTCPeerConnection    // outside browsers: werift by default
 })`],
-  ['me.address · me.seed', 'Your address (52 chars, your public key) and the 64-hex seed that recreates it. Keep the seed secret.',
+  [['me.address', 'me.seed'], 'Your address (52 characters: your public key) and the 64-hex seed that recreates it. Keep the seed secret.',
 `localStorage.setItem('seed', me.seed)
-const again = await Peer.create({ seed: localStorage.getItem('seed') })   // same address`],
-  ['me.publish(fields?) → Promise', 'Makes your address resolvable: a signed record naming your inbox anchors, republished every 30 min. Optional short fields, e.g. a display name.',
+
+// later: the same address again
+const seed = localStorage.getItem('seed')
+const again = await Peer.create({ seed })`],
+  [['me.publish(fields?) → Promise'], 'Makes your address resolvable: a signed record naming your inbox anchors, republished every 30 minutes. Optional short fields, such as a display name.',
 `await me.publish({ n: 'Alice' })`],
-  ['me.resolve(address, { fresh }?) → Promise<{ address, seq, c, fields } | null>', 'Looks up a peer’s record (cached 30 s). c lists its inbox anchors; fields.n its name.',
-`const b = await me.resolve(address)
-console.log(b?.fields.n?.[0] ?? 'unnamed')`],
-  ['me.send(address, body) → Promise · me.on(fn) → off()', 'Sends a small JSON message (≤ 4 KB sealed) through the recipient’s inbox anchors: end-to-end encrypted, signed, best effort, kept ≤ 2 min.',
-`const off = me.on(({ from, body }) => console.log(from, body))
+  [['me.resolve(address, { fresh }?)', '  → Promise<{ address, seq, c, fields } | null>'], 'Looks up a peer’s record (cached for 30 s). c lists its inbox anchors; fields.n is its name.',
+`const record = await me.resolve(address)
+console.log(record?.fields.n?.[0] ?? 'unnamed')`],
+  [['me.send(address, body) → Promise', 'me.on(fn) → off()'], 'Sends a small JSON message (≤ 4 KB sealed) through the recipient’s inbox anchors: end-to-end encrypted, signed, best effort, kept for at most 2 minutes.',
+`const off = me.on(({ from, body }) => {
+  console.log(from, body)
+})
 await me.send(address, { hello: 'there' })`],
-  ['me.accept(fn) → off() · me.connect(address, { timeout, relay }?) → Promise<{ channel, kind, via? }>', 'Opens a WebRTC DataChannel: direct when possible, otherwise relayed by another peer (kind "peer", end-to-end encrypted). Only accepted if the other side called accept.',
-`me.accept(({ from, channel }) => { channel.onmessage = e => channel.send('echo: ' + e.data) })
+  [['me.accept(fn) → off()', 'me.connect(address, { timeout, relay }?)', '  → Promise<{ channel, kind, via? }>'], 'Opens a WebRTC DataChannel: direct when possible, otherwise relayed by another peer (kind "peer", still end-to-end encrypted). The other side must call accept.',
+`// on the receiving side
+me.accept(({ from, channel }) => {
+  channel.onmessage = e => channel.send('echo: ' + e.data)
+})
+
+// on the connecting side
 const { channel, kind } = await me.connect(address)
 channel.onmessage = e => console.log(e.data)
-channel.send('hi')                      // open once connect() resolves`],
-  ['me.topic(name) → Promise<Topic>', 'A topic is any name (1–200 bytes, case- and space-normalized). Nobody owns it.',
+channel.send('hi')   // already open when connect() resolves`],
+  [['me.topic(name) → Promise<Topic>'], 'A topic is any name (1–200 bytes, normalized for case and spaces). Nobody owns it.',
 `const chess = await me.topic('Chess')   // same as 'chess'`],
-  ['topic.publish({ lease, beacon }?) → Promise<{ stored }> · topic.unpublish()', 'Announces you in the topic with a signed lease (default and max 10 min; renewed at half) on 5 storage peers. unpublish withdraws it at once; in browsers this also happens when the page closes. beacon: false = presence only: nobody can connect to you.',
-`await chess.publish()`],
-  ['topic.search() → Promise<[{ address, presence, expires }]>', 'Peers with a live lease. presence "recent" means they renewed lately, not that they are online.',
-`for (const p of await chess.search()) console.log(p.address, new Date(p.expires))`],
-  ['topic.subscribe({ presence, message }) → off()', 'Live changes over one long poll: presence events ("recent" / "expired", within ~2 s) and, if you pass message, broadcasts from up to 4 topic neighbours (WebRTC links, so they see your IP). Presence alone opens no links.',
+  [['topic.publish({ lease, beacon }?) → Promise<{ stored }>', 'topic.unpublish()'], 'Announces you in the topic with a signed lease on 5 storage peers (default and maximum 10 minutes, renewed at half). unpublish withdraws it at once; in browsers that also happens when the page closes. beacon: false means presence only: nobody can connect to you.',
+`await chess.publish()
+
+// presence only, with a short lease (a visitor counter)
+await chess.publish({ beacon: false, lease: 120e3 })`],
+  [['topic.search()', '  → Promise<[{ address, presence, expires }]>'], 'Peers with a live lease. presence "recent" means they renewed lately, not that they are online.',
+`for (const p of await chess.search()) {
+  console.log(p.address, new Date(p.expires))
+}`],
+  [['topic.subscribe({ presence, message }) → off()'], 'Live changes over one long poll. presence: "recent" / "expired" events, within about 2 s. message: broadcasts from up to 4 topic neighbours over WebRTC links (so they see your IP). Presence alone opens no links.',
 `chess.subscribe({
-  presence: ({ address, presence }) => console.log(address, presence),
-  message: ({ from, body }) => console.log(from, body),
+  presence: ({ address, presence }) => {
+    console.log(address, presence)
+  },
+  message: ({ from, body }) => console.log(from, body)
 })`],
-  ['topic.broadcast(body) → Promise<{ sent }>', 'Sends a JSON body (≤ 1 KB) to the topic’s neighbours, who pass it on (4 hops). Best effort, never stored; at most 10 per minute. Publish first.',
+  [['topic.broadcast(body) → Promise<{ sent }>'], 'Sends a JSON body (≤ 1 KB) to the topic’s neighbours, who pass it on for up to 4 hops. Best effort, never stored, at most 10 per minute. Publish first.',
 `await chess.broadcast({ move: 'e4' })`],
-  ['topic.close() · me.close()', 'Leave a topic (unpublish, stop watching) · shut the peer down.', `await chess.close(); await me.close()`],
-  ['me.anchors() · me.addAnchors(text) → number', 'The anchor lines this peer would share · add lines from any text.',
-`me.addAnchors(await (await fetch(anchorListUrl)).text())`],
-  ['Errors', 'Failures are CorvaxError with a code: no-anchor, not-found, timeout, no-answer, ice-failed, no-relay, busy, no-storage, not-published, too-large, rate-limited, no-webrtc, unsupported, closed.',
-`try { await me.connect(address) } catch (e) { if (e.code === 'not-found') console.log('not published') }`],
-  ['Other exports', 'identity(seed?), z32/unz32 (address ⇄ key), normalize/topicId (topic names), parseLine/formatLine/Book (anchor lines), DHT (sans-IO Mainline KRPC).',
-`import { normalize, topicId } from '@sloev/corvax'   // or the browser URL above
-normalize('  Chess ') // 'chess'`],
+  [['topic.close()', 'me.close()'], 'Leave a topic (unpublish and stop watching); shut the peer down.',
+`await chess.close()
+await me.close()`],
+  [['me.anchors() → string', 'me.addAnchors(text) → number'], 'The anchor lines this peer would share; add anchor lines found in any text.',
+`const res = await fetch(anchorListUrl)
+me.addAnchors(await res.text())`],
+  [['Errors'], 'Failures are CorvaxError with a code: no-anchor, not-found, timeout, no-answer, ice-failed, no-relay, busy, no-storage, not-published, too-large, rate-limited, no-webrtc, unsupported, closed.',
+`try {
+  await me.connect(address)
+} catch (e) {
+  if (e.code === 'not-found') console.log('not published')
+}`],
+  [['Other exports'], 'identity(seed?), z32 / unz32 (address ⇄ key), normalize / topicId (topic names), parseLine / formatLine / Book (anchor lines), DHT (sans-IO Mainline KRPC).',
+`import { normalize, topicId } from '@sloev/corvax'
+
+normalize('  Chess ')   // 'chess'`]
 ]
+
+// A tiny highlighter for the docs (JS, HTML, shell): comments, strings, keywords, numbers, tags.
+const TOKENS = /((?<![:\w])\/\/.*|(?<=^|\s)#.*|<!--.*?-->)|('(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`)|\b(import|from|const|let|await|async|new|return|for|of|if|else|try|catch|true|false|null)\b|(\b\d[\d.e]*\b)|(<\/?[a-zA-Z!][\w-]*|\/?>)/gm
+function code (text) {
+  // one block per line: wrapped parts hang 2 columns under their own line, so indentation survives narrow screens
+  return h('pre', { class: 'code' }, h('code', {}, text.split('\n').map(line => {
+    const indent = line.length - line.trimStart().length, out = []
+    let at = indent
+    for (const m of line.matchAll(TOKENS)) {
+      out.push(line.slice(at, m.index), h('span', { class: 'hl' + m.slice(1).findIndex(Boolean) }, m[0]))
+      at = m.index + m[0].length
+    }
+    out.push(line.slice(at) || (at === indent ? ' ' : ''))
+    return h('span', { class: 'ln', style: `padding-left:${indent + 2}ch;text-indent:-2ch` }, out)
+  })))
+}
+
 function dox () {
   return h('article', {},
     live(),
@@ -414,29 +486,39 @@ function dox () {
     h('ul', {}, ['Your address is a key made in your browser. Nothing to sign up for.', 'Messages are end-to-end encrypted; connections are direct WebRTC, or relayed by another peer.', 'Anchors only introduce peers. Anyone can run one.'].map(t => h('li', {}, t))),
     h('p', {}, h('button', { class: 'btn primary', onclick: () => { ui.view = 'app'; store.set('corvax.view', 'app'); render() } }, 'Try it'), ' or build with it.'),
     h('h2', {}, 'Example: a live visitor counter'),
-    h('p', { class: 'small' }, 'A whole page. Save it as an .html file and open it in two tabs. No server or account; the count at the top of this page works the same way.'),
-    h('pre', {}, EXAMPLE),
+    h('p', {}, 'A whole page. Save it as an .html file and open it in two tabs. No server or account; the count at the top of this page works the same way.'),
+    code(EXAMPLE),
     h('h2', { id: 'docs' }, 'Technical documentation'),
     h('h3', {}, 'Start'),
-    h('p', { class: 'small' }, 'Browsers (no build step):'),
-    h('pre', {}, `<script type="module">\n  import { Peer } from '${CDN}'\n</script>`),
-    h('p', { class: 'small' }, 'Node ≥ 22, Bun, Deno and bundlers:'),
-    h('pre', {}, `npm i @sloev/corvax   # Deno: import { Peer } from 'npm:@sloev/corvax'\n\nimport { Peer } from '@sloev/corvax'`),
-    h('p', { class: 'small' }, 'Then:'),
-    h('pre', {}, `const me = await Peer.create()
+    h('p', {}, 'Browsers, no build step:'),
+    code(`<script type="module">\n  import { Peer } from\n    '${CDN}'\n</script>`),
+    h('p', {}, 'Node ≥ 22, Bun, Deno and bundlers:'),
+    code(`npm i @sloev/corvax\n\nimport { Peer } from '@sloev/corvax'\n// Deno: import { Peer } from 'npm:@sloev/corvax'`),
+    h('p', {}, 'Then:'),
+    code(`const me = await Peer.create()
 await me.publish()
-me.accept(({ from, channel }) => channel.onmessage = e => console.log(from, e.data))
+
+me.accept(({ from, channel }) => {
+  channel.onmessage = e => console.log(from, e.data)
+})
+
 const { channel } = await me.connect('<address>')
 channel.send('hello')`),
     h('h3', {}, 'Reference'),
-    API.map(([sig, what, ex]) => h('section', { class: 'ref' }, h('h4', {}, h('code', {}, sig)), h('p', { class: 'small' }, what), h('pre', {}, ex))),
+    API.map(([sigs, what, ex]) => h('section', { class: 'ref' },
+      h('h4', {}, sigs.map(s => h('code', {}, s))), h('p', {}, what), code(ex))),
     h('h3', {}, 'Run a node'),
-    h('pre', {}, `npx @sloev/corvax node               # an anchor when reachable on UDP+TCP 4799
-npx @sloev/corvax anchor --public-host IP   # a first anchor of a network
-curl -s ${node.origin}                # this anchor's list, as plain text`),
-    h('p', { class: 'small' }, 'Wire protocol: ', h('a', { href: 'https://github.com/sloev/corvax/blob/main/SPEC.md' }, 'SPEC.md'), ' · ', h('a', { href: 'https://github.com/sloev/corvax' }, 'source')),
-    h('h3', {}, 'This node'), h('pre', {}, node.line),
-    h('h3', {}, 'Known anchors'), h('pre', {}, anchors.textContent))
+    code(`# an anchor when reachable on UDP+TCP 4799
+npx @sloev/corvax node
+
+# a first anchor of a network
+npx @sloev/corvax anchor --public-host IP
+
+# this anchor's list, as plain text
+curl -s ${node.origin}`),
+    h('p', {}, 'Wire protocol: ', h('a', { href: 'https://github.com/sloev/corvax/blob/main/SPEC.md' }, 'SPEC.md'), ' · ', h('a', { href: 'https://github.com/sloev/corvax' }, 'source')),
+    h('h3', {}, 'This node'), h('pre', { class: 'lines' }, node.line),
+    h('h3', {}, 'Known anchors'), h('pre', { class: 'lines' }, anchors.textContent))
 }
 
 // ---- STATS ------------------------------------------------------------------------------------
