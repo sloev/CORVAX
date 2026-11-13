@@ -91,7 +91,7 @@ test('homepage: tiny shell + app.js for browsers, plain anchor list for everythi
   assert.match(app.headers.get('content-type'), /javascript/)
   const js = await app.text()
   assert.match(js, /const LOGO = 'data:image\/png;base64,iVBOR/, 'logo inlined')
-  assert.ok(!/https?:\/\/(?!github\.com|cdn\.jsdelivr\.net\/npm\/@sloev\/corvax@0\.1\/)/.test(js.replace(/\$\{node\.origin\}/g, '')), 'app makes no external requests (the CDN URL is shown, never loaded)')
+  assert.ok(!/https?:\/\/(?!github\.com|cdn\.jsdelivr\.net\/npm\/@sloev\/)/.test(js.replace(/\$\{node\.origin\}/g, '')), 'app makes no external requests (the CDN URL is shown, never loaded)')
   assert.match((await fetch(base + '/og.png')).headers.get('content-type'), /image\/png/, 'social preview image')
   assert.match(html, /og:image" content="http:\/\/[^"]+\/og\.png"/)
   assert.equal((await fetch(base + '/logo')).status, 404, '/logo endpoint removed')

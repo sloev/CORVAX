@@ -85,6 +85,8 @@ Outside browsers, WebRTC comes from `werift` (an optional dependency); pass your
 
 ## Run a node
 
+**Apps:** [download for Windows, macOS, Linux and Android](https://github.com/sloev/corvax-native/releases/latest). They run a node in the background, and other apps on the device use it automatically ([source](https://github.com/sloev/corvax-native)).
+
 ```sh
 npx @sloev/corvax node               # becomes an anchor when strangers can reach UDP+TCP 4799
 npx @sloev/corvax anchor --public-host IP   # the first anchors of a network
