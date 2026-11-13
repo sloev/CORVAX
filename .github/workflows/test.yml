@@ -1,4 +1,4 @@
-# One small job, only when code changes. Firefox and WebKit run only when triggered by hand.
+# One small job, only when code changes; browsers, npm and Deno are cached. Firefox and WebKit run only when triggered by hand.
 name: test
 on:
   push:
@@ -26,11 +26,21 @@ jobs:
         with: { node-version: 22, cache: npm }
       - uses: oven-sh/setup-bun@v2
       - uses: denoland/setup-deno@v2
-        with: { deno-version: v2.x }
+        with: { deno-version: v2.x, cache: true }
       - run: npm ci && npm run build
+      - name: Playwright version
+        id: pw
+        run: npm i --no-save playwright && echo "v=$(npx playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4                    # the browser download is the slowest step: cache it per Playwright version
+        id: browsers
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ steps.pw.outputs.v }}-${{ inputs.browsers || 'chromium' }}
       - name: Browsers
         env: { BROWSERS: "${{ inputs.browsers || 'chromium' }}" }
-        run: npm i --no-save playwright && npx playwright install --with-deps ${BROWSERS//,/ }
+        run: |
+          if [ "${{ steps.browsers.outputs.cache-hit }}" = true ]; then npx playwright install-deps ${BROWSERS//,/ }
+          else npx playwright install --with-deps ${BROWSERS//,/ }; fi
       - name: Node (incl. browsers)
         env: { BROWSERS: "${{ inputs.browsers || 'chromium' }}" }
         run: npm test

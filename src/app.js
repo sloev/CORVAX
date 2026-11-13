@@ -347,7 +347,7 @@ const DL = 'https://github.com/sloev/corvax-native/releases/latest/'
 const APPS = [
   ['Windows', 'CORVAX_0.1.0_x64-setup.exe', 'installer, 1.6 MB'],
   ['macOS', 'CORVAX_0.1.0_universal.dmg', 'Apple silicon and Intel, 6.8 MB'],
-  ['Linux', 'CORVAX_0.1.0_amd64.deb', '.deb, 2 MB (.rpm and .AppImage under all downloads)'],
+  ['Linux', 'CORVAX_0.1.0_amd64.deb', '.deb, 2 MB (.rpm under all downloads)'],
   ['Android', 'corvax-android-preview.apk', 'preview APK, 2.2 MB, not yet tested on devices']
 ]
 // The one example on DOX: a complete page with a live visitor counter, like the one at the top.
