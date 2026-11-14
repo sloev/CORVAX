@@ -41,6 +41,14 @@ export function isPublic (host) {
 
 const publicUrl = u => { try { return isPublic(new URL(u).hostname.replace(/^\[|\]$/g, '')) } catch { return false } }
 
+// "What I already know" as a Bloom filter over anchor keys: 2048 bits, 3 probes. Keys are random, so their own
+// bytes serve as the hashes. without(text, have) drops the lines the asker already has (≈ 2 % false positives at 200).
+const probes = key => { const b = unz32(key); return [0, 2, 4].map(i => (b[i] << 8 | b[i + 1]) & 2047) }
+export function without (text, have) {
+  if (!(have instanceof Uint8Array) || have.length !== 256) return text
+  return String(text).split('\n').filter(l => { const e = parseLine(l.trim()); return !e || !probes(e.key).every(p => have[p >> 3] & 1 << (p & 7)) }).join('\n')
+}
+
 export class Book {
   constructor ({ allowPrivate = false, now = () => Date.now() } = {}) {
     this.entries = new Map()     // key -> entry
@@ -68,6 +76,11 @@ export class Book {
     return added
   }
 
+  have () {
+    const f = new Uint8Array(256)
+    for (const e of this.best(200)) for (const p of probes(e.key)) f[p >> 3] |= 1 << (p & 7)
+    return f
+  }
   get (key) { return this.entries.get(key) }
   remove (key) { this.entries.delete(key) }
 

@@ -224,7 +224,8 @@ What an anchor does over HTTP, every peer also does for the peers connected to i
 | Query (over any connection's `cx` channel or a relayed topic link) | Every peer answers |
 |---|---|
 | `get {k}` / `put {k, seq, sig, v}` | Beacons it holds (≤ 512, newest `seq` wins, verified). On every new connection both sides `put` their own Beacon |
-| `cx_anchors {}` | its shared anchor list; both sides ask on connect, so anchor lists spread peer to peer |
+| `cx_anchors {have?}` | its shared anchor list; both sides ask on connect, so anchor lists spread peer to peer |
+| `cx_peers {}` | `{p: [ed_pub ‖ Beacon wire] ≤ 8}`: the Beacons of the peers connected to it (peer exchange) |
 | `cx_send {to, msg}` | `to` is itself: delivered. `to` is connected to it: passed on once (≤ 100 per 10 s; never if `relayFor` is off). Otherwise error 204 |
 | `cx_tpub`, `cx_tfind` | topic storage (§6); publishers store on every connected peer too, and searches ask them |
 
@@ -235,6 +236,17 @@ What an anchor does over HTTP, every peer also does for the peers connected to i
   2. else to an inbox anchor from its Beacon
   3. else through any connected peer that is connected to the recipient
 - **`publish`** succeeds when an anchor or a connected peer takes the Beacon.
+
+**`have`** (every `cx_anchors`, also over HTTP and UDP): a Bloom filter of the anchor keys the asker knows (256 B, 3 probes: bytes 0–1, 2–3, 4–5 of the key, each mod 2048; its best 200 entries). The reply leaves out lines whose key is in it, so a sync costs only what is new.
+
+**Memory:** a peer keeps what it learns and saves it within seconds of a change: its anchor book, and the Beacons of up to 64 peers it met (by connection or peer exchange).
+
+**Backbone:** a peer keeps `mesh` connections (default 3; 0 for peers that don't listen or relay) to peers it remembers, most recently seen first:
+- When it has fewer, on a lost link and every 5 min, it asks its peers `cx_peers` and dials (`p: "relay"`) up to 2 candidates. A candidate that fails 3 times is forgotten.
+- A peer accepts such links up to 12 connections (browsers) or 64.
+- So peers that share a mutual peer link up by themselves, and the network heals when peers or anchors leave.
+
+**Hedged sends:** a message goes to the recipient's first inbox anchor; the second is tried when the first fails or stays silent for 700 ms. The first success wins (duplicates are dropped by message id).
 
 Signalling (§7) uses messages, so two peers that share only a mutual peer can connect through it, and stay connected when it leaves.
 

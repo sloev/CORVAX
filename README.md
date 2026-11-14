@@ -81,6 +81,8 @@ Members are found by CORVAX presence, and signals travel over the room's own mes
 
 Every peer does for its connected peers what an anchor does: it keeps their Beacons, passes messages on, stores topic records and shares its anchor list. Two peers with one mutual peer can find each other and connect through it.
 
+Peers remember the anchors and peers they meet (browsers in `localStorage`, nodes on disk) and keep 3 links to peers they know (`Peer.create({ mesh: 3 })`, 0 to turn off), finding more through the peers they are connected to. The network grows with use and heals itself.
+
 With no network service at all, link two peers by hand. The codes are about 1,000 characters: paste them, show them as QR, read them out.
 
 ```js

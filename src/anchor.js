@@ -12,6 +12,7 @@ import { Inboxes } from './inbox.js'
 import { MAX_MESSAGE } from './message.js'
 export { Inboxes }
 import { serve } from './store.js'
+import { without } from './book.js'
 import { serveSocket } from './relay.js'
 
 const BODY_MAX = 24576                                // a 16 KB message plus its query
@@ -24,7 +25,7 @@ export function installHandlers (node) {
   for (const q of ['cx_hi', 'cx_tpub', 'cx_tfind']) h[q] = a => serve(ctx(), q, a)
   h.cx_anchors = async (a, from) => {
     if (a.me instanceof Uint8Array && a.me.length <= 255) node.book.add(str(a.me))
-    return { a: node.listing() }
+    return { a: without(node.listing(), a.have) }             // only the lines the asker lacks
   }
   // "Can strangers reach me?" The check is done by a different anchor when we know one.
   h.cx_check = async (a, from) => {

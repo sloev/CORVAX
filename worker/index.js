@@ -7,7 +7,7 @@ import { encode, decode } from '../src/bencode.js'
 import { TopicStore, serve } from '../src/store.js'
 import { Inboxes } from '../src/inbox.js'
 import { MAX_MESSAGE } from '../src/message.js'
-import { Book, formatLine } from '../src/book.js'
+import { Book, formatLine, without } from '../src/book.js'
 import { homepage, stats } from '../src/home.js'
 import { pack, unpack, verifyBeacon } from '../src/record.js'
 import { serveSocket } from '../src/relay.js'
@@ -106,7 +106,7 @@ export class Anchor extends DurableObject {
   async answer (q, a, origin, signal) {
     if (q === 'ping') return {}
     if (['cx_hi', 'cx_tpub', 'cx_tfind'].includes(q)) return serve({ id: this.id, store: this.store, line: this.line(origin), relay: true, stored: raw => this.persist(raw) }, q, a)
-    if (q === 'cx_anchors') { if (a.me instanceof Uint8Array && a.me.length <= 255) this.ctx.waitUntil(this.learn(str(a.me))); return { a: this.listing(origin) } }
+    if (q === 'cx_anchors') { if (a.me instanceof Uint8Array && a.me.length <= 255) this.ctx.waitUntil(this.learn(str(a.me))); return { a: without(this.listing(origin), a.have) } }
     if (q === 'cx_send') {
       if (!(a.to instanceof Uint8Array) || a.to.length !== 32 || !(a.msg instanceof Uint8Array) || a.msg.length > MAX_MESSAGE) throw [203, 'bad message']
       await this.inboxes.put(a.to, a.msg)

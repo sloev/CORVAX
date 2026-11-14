@@ -63,9 +63,9 @@ function register (peer, address, s) {
   const conn = { address, pc: s.pc, app: s.app, ctl: s.ctl }
   peer.conns.set(address, conn)
   s.ctl.onmessage = e => relay.onControl(peer, conn, e.data)
-  const gone = () => { if (peer.conns.get(address) === conn) peer.conns.delete(address); relay.onClosed(peer, conn) }
+  const gone = () => { if (peer.conns.get(address) === conn) peer.conns.delete(address); relay.onClosed(peer, conn); peer.weaveSoon() }   // heal the backbone
   s.ctl.onclose = gone
-  peer.greet(s.ctl).catch(() => {})                       // mesh: swap Beacons and anchor lists
+  peer.greet(s.ctl, address).catch(() => {})              // mesh: swap Beacons and anchor lists, remember the peer
   return conn
 }
 
@@ -116,7 +116,7 @@ export async function onSignal (peer, from, body) {
   const tp = purpose === 'topic' ? String(body.tp || '') : null
   const busy = () => peer.signal(from, { cx: 'busy', sid }).catch(() => {})
   if (purpose === 'app' && !peer.acceptors.size) return                       // nobody is accepting
-  if (purpose === 'relay' && !peer.relayFor) return busy()
+  if (purpose === 'relay' && (!peer.relayFor || peer.conns.size >= peer.maxConns)) return busy()
   if (peer.blockDirect.has(from)) return
   if (purpose === 'topic' && !peer.topics.accept(from, tp)) return busy()     // reserves a neighbour slot
   const s = session(peer, from, sid)

@@ -6,7 +6,7 @@ import { identity, supported, sign, sha1, hiOk } from './crypto.js'
 import { seal, open, MAX_AGE, MAX_MESSAGE, CAN_INFLATE } from './message.js'
 import { makeBeacon, verifyBeacon, fields, pack, unpack } from './record.js'
 import { encode, decode } from './bencode.js'
-import { Book, parseLine, formatLine } from './book.js'
+import { Book, parseLine, formatLine, without } from './book.js'
 import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, equal, fail, sleep, concat, xor, compare, readCapped, CorvaxError } from './bytes.js'
 export { CorvaxError }
 import * as rtc from './rtc.js'
@@ -17,6 +17,17 @@ import { TopicStore, serve } from './store.js'
 
 const isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined'
 const REPUBLISH = 30 * 60e3
+
+// Start the tasks one by one, the next when the previous fails or stays silent for `ms`; the first success wins.
+const hedge = (tasks, ms) => new Promise((resolve, reject) => {
+  let i = 0, left = tasks.length
+  const next = () => {
+    if (i >= tasks.length) return
+    const timer = setTimeout(next, ms)
+    tasks[i++]().then(resolve, e => { clearTimeout(timer); --left ? next() : reject(e) })
+  }
+  next()
+})
 
 export const hostUrl = e => `http://${e.host.includes(':') ? `[${e.host}]` : e.host}:${e.port}`
 
@@ -41,6 +52,9 @@ export class Peer {
     p.beacons = new Map()                    // address -> { beacon, t }
     p.held = new Map()                       // address -> signed Beacon record, served to neighbours (mesh)
     p.listen = o.listen !== false            // false = never receives messages
+    p.known = new Map()                      // address -> { t, fails, tried }: peers we met, remembered across restarts
+    p.mesh = o.mesh ?? (p.listen && p.relayFor && p.RTC ? 3 : 0)   // backbone: keep this many links to known peers
+    p.maxConns = isBrowser ? 12 : 64
     p.conns = new Map()                      // address -> open direct connection { pc, app, ctl }
     p.wsRelays = new Map()                   // anchor key -> WebSocket relay connection (last resort)
     p.sessions = new Map()                   // sid -> WebRTC negotiation state
@@ -80,6 +94,44 @@ export class Peer {
     await this.refresh()
     this.refresher = setInterval(() => this.refresh().catch(() => {}), 30 * 60e3)
     this.refresher.unref?.()
+    for (const card of String(await this.platform.loadPeers?.() || '').split('\n').filter(Boolean).slice(0, 64)) {
+      await this.learn(card).then(a => this.known.set(a, { t: 0, fails: 0 }), () => {})
+    }
+    this.weaver = setInterval(() => this.weaveSoon(0), 300e3)
+    this.weaver.unref?.()
+    this.weaveSoon()
+  }
+
+  // ---- memory and backbone (SPEC §13) -------------------------------------------------------------------
+  // Everything learned is kept: anchors (the book) and peers (their Beacons), saved a few seconds after any change.
+  remember () {
+    if (this.saving || this.abort.signal.aborted) return
+    this.saving = setTimeout(() => { this.saving = null; this.#save() }, 3000)
+    this.saving.unref?.()
+  }
+  #save () {
+    this.platform.saveCache?.(this.book.toText())
+    this.platform.savePeers?.([...this.known].sort((x, y) => y[1].t - x[1].t).slice(0, 64)
+      .map(([a]) => this.held.get(a)).filter(Boolean).map(r => 'cxb' + b64(concat(r.pub, pack(r)))).join('\n'))
+  }
+  // Keep `mesh` links to peers we know, so the network holds together without anchors and heals when links drop
+  // (a small active view over a remembered passive view, as in HyParView). New candidates come from peer exchange.
+  weaveSoon (ms = 2000) {
+    if (!this.mesh || this.weaving || this.abort.signal.aborted) return
+    this.weaving = setTimeout(() => { this.weaving = null; this.#weave().catch(() => {}) }, ms)
+    this.weaving.unref?.()
+  }
+  async #weave () {
+    if (this.conns.size < this.mesh) await Promise.allSettled(this.neighbours(4).map(n => this.#exchange(n.ch)))   // whom do my peers know now?
+    for (let tries = 0; tries < 2 && this.conns.size < this.mesh && !this.abort.signal.aborted; tries++) {
+      const now = Date.now()
+      const pool = [...this.known].filter(([a, k]) => a !== this.address && !this.conns.has(a) && !(now - k.tried < 300e3))
+        .sort((x, y) => y[1].t - x[1].t).slice(0, 8)
+      if (!pool.length) return
+      const [a, k] = pool[Math.floor(Math.random() * pool.length)]
+      k.tried = now
+      try { await rtc.direct(this, a, { purpose: 'relay', timeout: 8000 }) } catch { if (++k.fails >= 3) { this.known.delete(a); this.remember() } }
+    }
   }
 
   // A CORVAX node on this device (or the given URL) becomes our first inbox, store and relay: apps find the local
@@ -99,7 +151,7 @@ export class Peer {
   // Pull anchor lists from our anchors and verify what is new, so every peer converges on the same
   // set of anchors and storage peers (topic records go to the closest ones in *our* book).
   async refresh () {
-    await Promise.allSettled(this.inboxes.slice(0, 1).map(ib => this.rpc(ib.url, 'cx_anchors', {}).then(r => this.book.add(str(r.a)))))
+    await Promise.allSettled(this.inboxes.slice(0, 1).map(ib => this.rpc(ib.url, 'cx_anchors', { have: this.book.have() }).then(r => this.book.add(str(r.a)))))
     await this.verify(16)
     this.#rehome()
     this.platform.saveCache?.(this.book.toText())
@@ -225,12 +277,10 @@ export class Peer {
     const pass = n => this.chanRpc(n.ch, 'cx_send', { to, msg }, 5000)
     const direct = this.neighbours(64).find(n => n.address === address)       // 1. an open connection to them: no anchor
     if (direct) try { await pass(direct); return true } catch {}
+    // 2. their inbox anchors, hedged: the second is tried when the first fails or has not answered within 700 ms
+    const urls = beacon.c.map(line => { const e = parseLine(line); return e && this.urlOf(e) }).filter(Boolean)
     let last = 'no usable anchor line'
-    for (const line of beacon.c) {                                             // 2. their inbox anchors
-      const e = parseLine(line), url = e && this.urlOf(e)
-      if (!url) continue
-      try { await this.rpc(url, 'cx_send', { to, msg }); return true } catch (err) { last = err.message }
-    }
+    try { if (urls.length) { await hedge(urls.map(u => () => this.rpc(u, 'cx_send', { to, msg })), 700); return true } } catch (err) { last = err.message }
     const via = await Promise.allSettled(this.neighbours().filter(n => n !== direct).map(pass))   // 3. a peer we share with them
     if (via.some(r => r.status === 'fulfilled')) return true
     throw fail('no-anchor', `no inbox of ${address} is reachable (${last})`)
@@ -254,14 +304,27 @@ export class Peer {
     if (this.held.size > 512) this.held.delete(this.held.keys().next().value)
   }
   // On every new connection: hand over our Beacon and swap anchor lists, so both spread without any server.
-  async greet (ch) {
+  // And remember the peer, and ask whom it is connected to (peer exchange): candidates for our backbone.
+  async greet (ch, address) {
     const m = this.mine ||= await this.#beacon()
+    this.known.set(address, { t: Date.now(), fails: 0 })
+    this.remember()
     this.chanRpc(ch, 'put', { k: m.pub, seq: m.seq, sig: m.sig, v: m.v }, 5000).catch(() => {})
-    this.chanRpc(ch, 'cx_anchors', {}, 5000).then(async r => {
+    this.chanRpc(ch, 'cx_anchors', { have: this.book.have() }, 5000).then(async r => {
       if (!this.book.add(str(r.a)).length) return
       await this.verify(8)
       this.#rehome()
+      this.remember()
     }).catch(() => {})
+    if (this.mesh) this.#exchange(ch).then(() => this.weaveSoon(), () => {})
+  }
+  async #exchange (ch) {
+    const r = await this.chanRpc(ch, 'cx_peers', {}, 5000)
+    for (const b of (Array.isArray(r.p) ? r.p : []).slice(0, 8)) {
+      const a = await this.learn('cxb' + b64(b)).catch(() => null)
+      if (a && a !== this.address && !this.known.has(a)) this.known.set(a, { t: Date.now() - 60e3, fails: 0 })
+    }
+    this.remember()
   }
   // get / put: Beacons we hold · cx_anchors: our anchor list · cx_send: deliver to us, or pass on to a peer connected to us
   async #mesh (q, a) {
@@ -276,7 +339,8 @@ export class Peer {
       this.#hold(rec)
       return {}
     }
-    if (q === 'cx_anchors') return { a: this.anchors() }
+    if (q === 'cx_anchors') return { a: without(this.anchors(), a.have) }
+    if (q === 'cx_peers') return { p: this.neighbours(8).map(n => this.held.get(n.address)).filter(Boolean).map(r => concat(r.pub, pack(r))) }
     if (!key(a.to) || !(a.msg instanceof Uint8Array) || a.msg.length > MAX_MESSAGE) throw [203, 'bad message']
     if (equal(a.to, this.id.pub)) { this.#onWire(a.msg); return { queued: 1 } }
     const next = this.relayFor && this.neighbours(64).find(n => n.address === z32(a.to)), now = Date.now()
@@ -365,7 +429,7 @@ export class Peer {
   // channel of any connection or on a topic link. So browsers and NATed peers can serve storage too.
   // (Only topic-membership records are ever stored; broadcasts never are.)
   answer (q, a) {
-    if (['get', 'put', 'cx_anchors', 'cx_send'].includes(q)) return this.#mesh(q, a)
+    if (['get', 'put', 'cx_anchors', 'cx_peers', 'cx_send'].includes(q)) return this.#mesh(q, a)
     return serve({ id: this.id, store: this.store, stored: raw => this.topics.local(raw).catch(() => {}) }, q, a)
   }
   chanRpc (ch, q, a = {}, timeout = 8000) {
@@ -396,7 +460,8 @@ export class Peer {
 
   async close () {
     await this.topics.close()                // unpublishes (tombstones) before the network goes away
-    clearInterval(this.refresher)
+    clearInterval(this.refresher); clearInterval(this.weaver); clearTimeout(this.weaving); clearTimeout(this.saving)
+    this.#save()
     clearInterval(this.sweeper)
     this.abort.abort()
     clearTimeout(this.republish)
@@ -418,6 +483,8 @@ export function defaultPlatform () {
   return {
     loadCache: () => { try { return ls?.getItem('corvax.anchors') || '' } catch { return '' } },
     saveCache: t => { try { ls?.setItem('corvax.anchors', t) } catch {} },
+    loadPeers: () => { try { return ls?.getItem('corvax.peers') || '' } catch { return '' } },
+    savePeers: t => { try { ls?.setItem('corvax.peers', t) } catch {} },
     fetchText: async u => str(await readCapped(await fetch(u, { signal: AbortSignal.timeout(8000) }), 256e3) || new Uint8Array()),   // ≤ 256 KB
     // DNS TXT through public DNS-over-HTTPS (JSON API); works in browsers and every runtime
     dnsTxt: async name => {

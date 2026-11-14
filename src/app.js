@@ -411,6 +411,7 @@ await chat.send({ text: 'hello' })`],
   relayFor: true,      // relay for others, within relayLimits
   storage: true,       // store other peers' topic records
   listen: true,        // false: no inbox (presence-only peers)
+  mesh: 3,             // links kept to peers it remembers; 0: none
   local,               // use a node on this device (127.0.0.1:4799):
                        //   native: on by default; browsers: true
   RTCPeerConnection    // outside browsers: werift by default

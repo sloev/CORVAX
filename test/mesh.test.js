@@ -120,3 +120,43 @@ test('browsers by hand: two tabs with no anchor in reach link with two codes and
   assert.deepEqual(await B.evaluate(() => window.got), ['by hand'])
   console.log(`# link codes: ${invite.length} and ${reply.length} characters`)
 })
+
+test('backbone: peers that share a mutual peer link up by themselves (peer exchange) and survive its leaving', async t => {
+  const [a, b, c] = [await alone(), await alone(), await alone()]
+  t.after(async () => { await a.close(); await b.close(); await c.close() })
+  await link(a, c); await link(b, c)                                            // nobody ever asks A and B to connect
+  await until(() => a.conns.has(b.address) && b.conns.has(a.address), 30000)
+  await c.close()
+  const got = new Promise(resolve => b.on(m => resolve(m.body)))
+  await a.send(b.address, 'healed')
+  assert.equal(await got, 'healed')
+})
+
+test('memory: a restarted peer remembers anchors and peers, and re-links to a peer it knew', async t => {
+  const n = await node({ anchor: 'force' })
+  const disk = {}, platform = { loadCache: () => disk.anchors || '', saveCache: x => { disk.anchors = x }, loadPeers: () => disk.peers || '', savePeers: x => { disk.peers = x } }
+  const o = { allowPrivate: true, fallback: [], local: false }
+  const b = await Peer.create({ ...o, anchors: [n.line()] })
+  let a = await Peer.create({ ...o, anchors: [n.line()], platform })
+  t.after(async () => { await a.close(); await b.close(); await n.close() })
+  await a.publish(); await b.publish()
+  b.accept(() => {})
+  await a.connect(b.address)
+  const seed = a.seed
+  await a.close()
+  assert.ok(disk.anchors.includes(n.key), 'anchor remembered')
+  assert.ok(disk.peers.startsWith('cxb'), 'peer remembered')
+  a = await Peer.create({ ...o, seed, platform })                               // no anchors given: all from memory
+  assert.equal(a.inboxes.length, 1)
+  await until(() => a.conns.has(b.address), 30000)                              // the backbone re-links without being asked
+})
+
+test('anchor lists sync by filter: only unknown lines are sent', async () => {
+  const { Book, without } = await import('../src/book.js'), { z32, random } = await import('../src/bytes.js')
+  const lines = Array.from({ length: 40 }, (_, i) => `corvax-anchor:${z32(random(32))}@8.8.${i}.1:4799`)
+  const mine = new Book()
+  mine.add(lines.slice(0, 30).join('\n'))
+  const news = without(lines.join('\n'), mine.have()).split('\n').filter(Boolean)
+  assert.ok(news.length >= 9 && news.length <= 10 && news.every(l => lines.indexOf(l) >= 30), `${news.length} of 40 lines sent`)
+  assert.equal(without('x', 'not a filter'), 'x')
+})
