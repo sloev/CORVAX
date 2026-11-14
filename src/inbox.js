@@ -22,13 +22,13 @@ export class Inboxes {
     }
     box.waiter?.(); box.waiter = null
   }
-  async listen (k, after, signal) {
+  async listen (k, after, signal, wait = POLL_MAX) {
     const box = this.#box(k)
     box.msgs = box.msgs.filter(m => m.seq > after)                      // acknowledged → deleted
     if (!box.msgs.length && !signal?.aborted) {
       box.waiter?.()                                                    // a newer poll ends the older one
       await new Promise(resolve => {
-        const timer = setTimeout(done, POLL_MAX)
+        const timer = setTimeout(done, Math.min(Math.max(+wait || POLL_MAX, 1e3), 55e3))
         function done () { clearTimeout(timer); signal?.removeEventListener('abort', done); if (box.waiter === done) box.waiter = null; resolve() }
         box.waiter = done
         signal?.addEventListener('abort', done)

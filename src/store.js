@@ -50,7 +50,7 @@ export class TopicStore {
   cursor () { return `${this.epoch}:${this.n}` }
 
   // Long poll for a set of topics. Returns { snap, r, c }.
-  async watch (ids, c, signal) {
+  async watch (ids, c, signal, wait) {
     const want = new Set(ids.map(hex))
     const from = this.#parse(c)
     if (from === null) return { snap: 1, r: this.find(ids), c: this.cursor() }
@@ -60,7 +60,7 @@ export class TopicStore {
         const w = { want, timer: null, coalescing: false }
         const done = () => { clearTimeout(w.timer); this.waiters.delete(w); signal?.removeEventListener('abort', done); resolve() }
         w.wake = () => { if (w.coalescing) return; w.coalescing = true; clearTimeout(w.timer); w.timer = setTimeout(done, this.coalesce) }
-        w.timer = setTimeout(done, this.poll)
+        w.timer = setTimeout(done, wait ? Math.min(Math.max(wait, 1e3), 55e3) : this.poll)
         w.done = done
         this.waiters.add(w)
         signal?.addEventListener('abort', done)

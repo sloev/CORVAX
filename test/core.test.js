@@ -102,3 +102,15 @@ test('score: unverified capped at 50, verified grows with age, dead decays', () 
   book.record(key, 'id', false)
   assert.equal(book.get(key), undefined)                             // wrong key: dropped
 })
+
+test('messages: compressed bodies round-trip, are smaller, and cannot inflate past the cap', async () => {
+  const a = await identity(), b = await identity()
+  const sdp = { cx: 'offer', sid: 'abc', sdp: 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n' + 'a=candidate:1 1 udp 2113937151 192.168.1.20 54400 typ host generation 0\r\n'.repeat(6) }
+  const plain = await seal(a, b.pub, b.xpub, sdp), small = await seal(a, b.pub, b.xpub, sdp, true)
+  assert.ok(small.length < plain.length * 0.7, `compressed ${small.length} < plain ${plain.length}`)
+  assert.deepEqual((await open(b, small)).body, sdp)
+  assert.deepEqual((await open(b, plain)).body, sdp, 'uncompressed still read')
+  assert.equal((await seal(a, b.pub, b.xpub, { hi: 1 }, true)).length, (await seal(a, b.pub, b.xpub, { hi: 1 })).length, 'small bodies stay plain')
+  const big = await seal(a, b.pub, b.xpub, { x: '0'.repeat(200000) }, true)                 // 200 KB of zeros deflates to a few hundred bytes
+  await assert.rejects(open(b, big), /too large/)
+})

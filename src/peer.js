@@ -3,7 +3,7 @@
 // DataChannels (direct, or relayed by a third peer). Uses only fetch + WebCrypto + WebRTC,
 // so the same file runs in browsers, Node, Bun and Deno.
 import { identity, supported, sign, sha1, hiOk } from './crypto.js'
-import { seal, open, MAX_AGE, MAX_MESSAGE } from './message.js'
+import { seal, open, MAX_AGE, MAX_MESSAGE, CAN_INFLATE } from './message.js'
 import { makeBeacon, verifyBeacon, fields, pack, unpack } from './record.js'
 import { encode, decode } from './bencode.js'
 import { Book, parseLine, formatLine } from './book.js'
@@ -78,7 +78,7 @@ export class Peer {
     }
     this.inboxes = this.#chooseInboxes()
     await this.refresh()
-    this.refresher = setInterval(() => this.refresh().catch(() => {}), 10 * 60e3)
+    this.refresher = setInterval(() => this.refresh().catch(() => {}), 30 * 60e3)
     this.refresher.unref?.()
   }
 
@@ -99,7 +99,7 @@ export class Peer {
   // Pull anchor lists from our anchors and verify what is new, so every peer converges on the same
   // set of anchors and storage peers (topic records go to the closest ones in *our* book).
   async refresh () {
-    await Promise.allSettled(this.inboxes.map(ib => this.rpc(ib.url, 'cx_anchors', {}).then(r => this.book.add(str(r.a)))))
+    await Promise.allSettled(this.inboxes.slice(0, 1).map(ib => this.rpc(ib.url, 'cx_anchors', {}).then(r => this.book.add(str(r.a)))))
     await this.verify(16)
     this.#rehome()
     this.platform.saveCache?.(this.book.toText())
@@ -176,7 +176,7 @@ export class Peer {
     this.extra = extra
     const near = this.neighbours()
     if (!this.inboxes.length && !near.length) throw fail('no-anchor', 'no verified anchor or connected peer to publish through')
-    const rec = this.mine = await makeBeacon(this.id, { ...extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
+    const rec = this.mine = await this.#beacon(extra)
     const targets = [...this.inboxes.map(ib => ib.url), ...this.book.best(2, 'native', e => e.verified).map(e => this.urlOf(e))]
     const put = { k: rec.pub, seq: rec.seq, sig: rec.sig, v: rec.v }
     const ok = await Promise.allSettled([...[...new Set(targets.filter(Boolean))].map(u => this.rpc(u, 'put', put)),
@@ -191,9 +191,9 @@ export class Peer {
 
   async resolve (address, { fresh = false } = {}) {
     const cached = this.beacons.get(address)
-    if (cached && !fresh && Date.now() - cached.t < 30e3) return cached.beacon
+    if (cached && !fresh && Date.now() - cached.t < 600e3) return cached.beacon      // Beacons change rarely; signal() re-reads when sending fails
     const pub = unz32(address), target = await sha1(pub)
-    const urls = [...new Set([...this.inboxes.map(ib => ib.url), ...this.book.best(3, 'native', e => e.verified).map(e => this.urlOf(e))].filter(Boolean))].slice(0, 3)
+    const urls = [...new Set([...this.inboxes.map(ib => ib.url), ...this.book.best(3, 'native', e => e.verified).map(e => this.urlOf(e))].filter(Boolean))].slice(0, 2)
     let best = this.held.get(address) || null
     const take = async r => {
       if (!r.v || !(r.k instanceof Uint8Array) || !equal(r.k, pub)) return
@@ -213,9 +213,15 @@ export class Peer {
   }
 
   async signal (address, body, beacon) {
-    beacon ??= await this.resolve(address)
+    const cached = !beacon && this.beacons.has(address)
+    try { return await this.#signal(address, body, beacon || await this.resolve(address)) } catch (e) {
+      if (!cached || e.code !== 'no-anchor') throw e
+      return this.#signal(address, body, await this.resolve(address, { fresh: true }))   // their inboxes may have moved
+    }
+  }
+  async #signal (address, body, beacon) {
     if (!beacon?.x) throw fail('not-found', `no record for ${address}`)
-    const to = unz32(address), msg = await seal(this.id, to, beacon.x, body)
+    const to = unz32(address), msg = await seal(this.id, to, beacon.x, body, beacon.fields.v?.[0] >= 2)   // v ≥ 2 reads compressed bodies
     const pass = n => this.chanRpc(n.ch, 'cx_send', { to, msg }, 5000)
     const direct = this.neighbours(64).find(n => n.address === address)       // 1. an open connection to them: no anchor
     if (direct) try { await pass(direct); return true } catch {}
@@ -238,6 +244,8 @@ export class Peer {
     for (const l of this.topics.links.values()) if (l.kind === 'peer' && l.channel.readyState === 'open' && !out.some(x => x.address === l.address)) out.push({ address: l.address, ch: l.channel })
     return out.slice(0, n)
   }
+  // v=2: this peer reads compressed message bodies and batched ICE candidates
+  #beacon (extra = this.extra) { return makeBeacon(this.id, { ...extra, ...(CAN_INFLATE && { v: 2 }), c: this.inboxes.map(ib => formatLine(ib.entry)) }) }
   #hold (rec) {
     const a = z32(rec.pub), old = this.held.get(a)
     if (old && old.seq >= rec.seq) return
@@ -247,7 +255,7 @@ export class Peer {
   }
   // On every new connection: hand over our Beacon and swap anchor lists, so both spread without any server.
   async greet (ch) {
-    const m = this.mine ||= await makeBeacon(this.id, { ...this.extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
+    const m = this.mine ||= await this.#beacon()
     this.chanRpc(ch, 'put', { k: m.pub, seq: m.seq, sig: m.sig, v: m.v }, 5000).catch(() => {})
     this.chanRpc(ch, 'cx_anchors', {}, 5000).then(async r => {
       if (!this.book.add(str(r.a)).length) return
@@ -284,7 +292,7 @@ export class Peer {
   link (code) { return rtc.hand(this, code) }
   // Your Beacon as text; learn() someone else's. Then envelope() seals a message as text and receive() opens one.
   async card () {
-    const m = this.mine ||= await makeBeacon(this.id, { ...this.extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
+    const m = this.mine ||= await this.#beacon()
     return 'cxb' + b64(concat(m.pub, pack(m)))
   }
   async learn (card) {
@@ -329,7 +337,7 @@ export class Peer {
       try {
         // v 2: the signature names this anchor and the ack, so nobody can replay a poll elsewhere or forge an ack
         const ts = Date.now(), sig = await sign(this.id, utf8(`cx-listen:${ts}:${after}:${ib.entry.key}`))
-        const r = await this.rpc(ib.url, 'cx_listen', { k: this.id.pub, ts, sig, after, v: 2 }, { timeout: 35000, retries: 0 })
+        const r = await this.rpc(ib.url, 'cx_listen', { k: this.id.pub, ts, sig, after, v: 2, w: 50 }, { timeout: 65000, retries: 0 })   // w: wait 50 s when idle
         ib.fails = 0
         for (const m of r.msgs || []) { after = Math.max(after, m.seq); this.#onWire(m.msg) }
       } catch {

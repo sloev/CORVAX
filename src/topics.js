@@ -215,7 +215,7 @@ export class Topics {
     while (!state.ac.signal.aborted && !this.closed) {
       try {
         const t0 = this.now()
-        const r = await this.peer.rpc(this.peer.urlOf(e), 'cx_twatch', { t: ids, ...(cursor && { c: cursor }) }, { timeout: 35000, retries: 0, signal: state.ac.signal })
+        const r = await this.peer.rpc(this.peer.urlOf(e), 'cx_twatch', { t: ids, w: 50, ...(cursor && { c: cursor }) }, { timeout: 65000, retries: 0, signal: state.ac.signal })
         this.sample(r.now, t0, this.now())
         fails = 0
         cursor = r.c instanceof Uint8Array ? str(r.c) : undefined

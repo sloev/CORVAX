@@ -134,7 +134,7 @@ export function handler (node) {
       const t = ids(a.t, 64)
       if (!t.length) throw [203, 'no topics']
       return poll(from.host, async () => {
-        const r = await node.store.watch(t, a.c instanceof Uint8Array ? str(a.c) : undefined, signal)
+        const r = await node.store.watch(t, a.c instanceof Uint8Array ? str(a.c) : undefined, signal, a.w * 1000)
         return { c: r.c, r: r.r, now: Date.now(), ...(r.snap && { snap: 1 }) }
       })
     }
@@ -143,7 +143,7 @@ export function handler (node) {
       const after = typeof a.after === 'number' ? a.after : 0
       // v 2 binds the poll to this anchor and to its ack; the old form stays for older clients
       if (!await verify(a.k, a.sig, utf8(a.v === 2 ? `cx-listen:${a.ts}:${after}:${node.key}` : `cx-listen:${a.ts}`))) throw [206, 'bad signature']
-      return poll(from.host, async () => ({ msgs: await node.inboxes.listen(a.k, after, signal) }))
+      return poll(from.host, async () => ({ msgs: await node.inboxes.listen(a.k, after, signal, a.w * 1000) }))
     }
     return node.dht.answer(q, a, from)
   }

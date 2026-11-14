@@ -27,13 +27,33 @@ function session (peer, address, sid, beacon) {
   s.ctl = s.pc.createDataChannel('cx', { negotiated: true, id: 1 })
   s.app.binaryType = s.ctl.binaryType = 'arraybuffer'
   s.open = Promise.all([opened(s.app), opened(s.ctl)])
+  // Fewer, smaller messages through anchors: candidates found before the offer/answer is sent (s.sent) ride in its
+  // SDP; later ones go out together every 150 ms (one message `cs` to peers with v ≥ 2, else one each).
+  const batch = []
+  const flushOut = () => {
+    s.timer = null
+    const cs = batch.splice(0)
+    if (!cs.length) return
+    if (beacon?.fields.v?.[0] >= 2 || s.batched) return peer.signal(address, { cx: 'cand', sid, cs }, beacon).catch(() => {})
+    for (const [c, m, i] of cs) peer.signal(address, { cx: 'cand', sid, c, m, i }, beacon).catch(() => {})
+  }
   s.pc.onicecandidate = e => {
     const c = e.candidate
-    if (c?.candidate && address) peer.signal(address, { cx: 'cand', sid, c: c.candidate, m: c.sdpMid ?? '0', i: c.sdpMLineIndex ?? 0 }, beacon).catch(() => {})
+    if (!c?.candidate || !address || !s.sent) return
+    batch.push([c.candidate, c.sdpMid ?? '0', c.sdpMLineIndex ?? 0])
+    s.timer ||= setTimeout(flushOut, 150)
   }
   setTimeout(() => { if (peer.sessions.get(sid) === s) peer.sessions.delete(sid) }, 60e3).unref?.()
   return s
 }
+// Give ICE 150 ms (or until it is done) so the local candidates are inside the SDP we are about to send.
+const brief = s => new Promise(resolve => {
+  const done = () => { s.sent = true; resolve() }
+  if (s.pc.iceGatheringState === 'complete') return done()
+  const timer = setTimeout(done, 150), on = s.pc.onicecandidate
+  s.pc.onicecandidate = e => { if (!e.candidate) { clearTimeout(timer); s.pc.onicecandidate = on; done() } }
+  setTimeout(() => { s.pc.onicecandidate = on }, 150)
+})
 function flush (s) {
   if (!s.pc?.remoteDescription) return
   for (const c of s.queue.splice(0)) s.pc.addIceCandidate({ candidate: c.c, sdpMid: c.m, sdpMLineIndex: c.i }).catch(() => {})
@@ -59,7 +79,8 @@ export async function direct (peer, address, { timeout = 10000, purpose = 'app',
   const answered = new Promise((resolve, reject) => { s.answered = resolve; s.busy = () => reject(fail('busy', 'peer declined')) })
   try {
     await s.pc.setLocalDescription(await s.pc.createOffer())
-    await peer.signal(address, { cx: 'offer', sid, sdp: s.pc.localDescription.sdp, p: purpose, ...(tp && { tp }) }, beacon)
+    await brief(s)
+    await peer.signal(address, { cx: 'offer', sid, sdp: s.pc.localDescription.sdp, p: purpose, v: 2, ...(tp && { tp }) }, beacon)
     const sdp = await withTimeout(answered, timeout, 'no-answer')
     await s.pc.setRemoteDescription({ type: 'answer', sdp })
     flush(s)
@@ -85,7 +106,7 @@ export async function onSignal (peer, from, body) {
       peer.sessions.set(sid, s = { queue: [], address: from })
       setTimeout(() => { if (peer.sessions.get(sid) === s && !s.pc) peer.sessions.delete(sid) }, 30e3).unref?.()
     }
-    if (s.queue.length < 64) s.queue.push({ c: String(body.c), m: body.m, i: body.i })
+    for (const [c, m, i] of Array.isArray(body.cs) ? body.cs.slice(0, 32) : [[body.c, body.m, body.i]]) if (s.queue.length < 64) s.queue.push({ c: String(c), m, i })
     return flush(s)
   }
   if (body.cx === 'answer') return theirs?.answered?.(String(body.sdp))
@@ -103,6 +124,8 @@ export async function onSignal (peer, from, body) {
     await s.pc.setRemoteDescription({ type: 'offer', sdp: String(body.sdp) })
     await s.pc.setLocalDescription(await s.pc.createAnswer())
     flush(s)
+    s.batched = body.v >= 2                                // the offerer reads batched candidates
+    await brief(s)
     await peer.signal(from, { cx: 'answer', sid, sdp: s.pc.localDescription.sdp })
     await withTimeout(s.open, 30000, 'ice-failed')
   } catch { try { s.pc.close() } catch {} if (tp) peer.topics.release(from, tp); return } finally { peer.sessions.delete(sid) }

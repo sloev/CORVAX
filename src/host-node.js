@@ -37,7 +37,7 @@ async function http ({ port, address }, handle, onsocket) {
     res.writeHead(out.status, out.headers)
     res.end(out.body)
   })
-  server.requestTimeout = 40e3
+  server.requestTimeout = 75e3
   server.on('upgrade', (req, socket) => onsocket(new URL(req.url, 'http://x').pathname, websocket(req, socket)))
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, address, resolve) })
   return { close: () => new Promise(resolve => { server.closeAllConnections?.(); server.close(resolve) }) }

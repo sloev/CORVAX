@@ -117,12 +117,12 @@ export class Anchor extends DurableObject {
       const after = typeof a.after === 'number' ? a.after : 0
       // v 2 binds the poll to this anchor and to its ack; the old form stays for older clients
       if (!await verify(a.k, a.sig, utf8(a.v === 2 ? `cx-listen:${a.ts}:${after}:${this.key}` : `cx-listen:${a.ts}`))) throw [206, 'bad signature']
-      return { msgs: await this.inboxes.listen(a.k, after, signal) }
+      return { msgs: await this.inboxes.listen(a.k, after, signal, a.w * 1000) }
     }
     if (q === 'cx_twatch') {
       const t = Array.isArray(a.t) ? a.t.filter(b => b instanceof Uint8Array && b.length === 32).slice(0, 64) : []
       if (!t.length) throw [203, 'no topics']
-      const r = await this.store.watch(t, a.c instanceof Uint8Array ? str(a.c) : undefined, signal)
+      const r = await this.store.watch(t, a.c instanceof Uint8Array ? str(a.c) : undefined, signal, a.w * 1000)
       return { c: r.c, r: r.r, now: Date.now(), ...(r.snap && { snap: 1 }) }
     }
     if (q === 'put') {

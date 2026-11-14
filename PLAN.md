@@ -50,6 +50,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 | Apps live in `sloev/corvax-native` | The protocol repo stays small and runtime-free |
 | Peers serve what anchors serve, over WebRTC | A connected network survives losing every anchor; all nodes have the same features |
 | Inbox anchors by XOR distance among the good ones; dead inboxes replaced | Load spreads over all anchors instead of the top two; peers stay reachable |
+| Light on anchors: 50 s polls, deflated message bodies, candidates in the SDP or batched, Beacons cached 10 min, refresh every 30 min | One connection costs 2 messages (~1.6 KB) instead of 4+ (~3 KB); idle traffic halves. Negotiated by `v=2` in the Beacon, so older peers keep working |
 | Inbox polls and relay hellos name the anchor (v 2) | A poll or hello can't be replayed elsewhere, an ack can't be forged |
 
 ## One-shot plan v1.1
@@ -68,7 +69,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 
 ## Status
 
-- [x] **Node:** 57 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app, Trystero, mesh)
+- [x] **Node:** 58 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app, Trystero, mesh)
 - [x] **No anchors at all** (`test/mesh.test.js`): peers linked by hand exchange messages, Beacons and topic records; two peers that share only a mutual peer find each other by topic, connect through it and stay connected when it leaves; also between two Chromium tabs with the only anchor shut down
 - [x] **Bun 1.4 and Deno 2.9:** smoke test (anchors, messages, direct and relayed channels, topics)
 - [x] **Live:** our Beacon round-trips through `relay.pkarr.org`; DNS TXT via DoH

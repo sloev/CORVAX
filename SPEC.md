@@ -26,7 +26,8 @@ x key     HKDF-SHA256(seed, info "cx/x25519")
 ```
 wire  sig 64 ‖ seq 8 (big-endian, µs) ‖ v       sig = Ed25519("3:seq" ‖ bencode(seq) ‖ "1:v" ‖ bencode(v))
 v     DNS response (≤ 1000 B) of TXT records named "_cx", each "key=value":
-      x=<b64 x_pub>   c=<anchor line of an inbox> (1–2)   other keys: application data
+      x=<b64 x_pub>   c=<anchor line of an inbox> (0–2)   v=2 (reads compressed bodies and batched candidates)
+      other keys: application data
 ```
 
 **Anchor line** (≤ 255 chars):
@@ -39,6 +40,7 @@ v     DNS response (≤ 1000 B) of TXT records named "_cx", each "key=value":
 wire   eph_x 32 ‖ iv 12 ‖ AES-256-GCM(K, inner ‖ Ed25519(inner))
 K      HKDF-SHA256(X25519(eph, x_pub of recipient), info "cx/msg" ‖ eph_x ‖ recipient x_pub)
 inner  bencode { from: ed_pub, to: ed_pub, id: 16 B, ts, body: JSON }
+       or, to a recipient whose Beacon has v ≥ 2 and when smaller: z: deflate-raw(JSON) instead of body (inflates to ≤ 64 KB)
 ```
 Accept a message only if the signature is valid, `to` is you, `|now − ts| < 10 min`, and `id` is new.
 
@@ -70,10 +72,10 @@ Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabl
 | `cx_check` | `{k, port, hport}` → `{udp, http, ip, by}` | asks a different anchor (`cx_probe`) to `cx_hi` the caller |
 | `cx_probe` | `{ip, port, hport, k}` → `{udp, http}` | only for callers that are verified anchors |
 | `cx_send` | `{to, msg}` → `{queued}` | inbox: 120 s, ≤ 64 messages and ≤ 1 MB per key, deduplicated by SHA-256 |
-| `cx_listen` | `{k, ts, sig, after?}` → `{msgs: [{seq, msg}]}` | HTTP. With `v: 2`: `sig = Ed25519("cx-listen:" ‖ ts ‖ ":" ‖ after ‖ ":" ‖ z32 key of this anchor)`, so a poll can't be replayed at another anchor and its ack can't be forged (without `v`: the old `"cx-listen:" ‖ ts`, accepted for older clients). ±300 s. `seq` = max(previous + 1, unix ms), so it keeps rising across anchor restarts. Deletes `seq ≤ after`; waits ≤ 25 s; a newer poll for `k` ends the older one |
+| `cx_listen` | `{k, ts, sig, after?}` → `{msgs: [{seq, msg}]}` | HTTP. With `v: 2`: `sig = Ed25519("cx-listen:" ‖ ts ‖ ":" ‖ after ‖ ":" ‖ z32 key of this anchor)`, so a poll can't be replayed at another anchor and its ack can't be forged (without `v`: the old `"cx-listen:" ‖ ts`, accepted for older clients). ±300 s. `seq` = max(previous + 1, unix ms), so it keeps rising across anchor restarts. Deletes `seq ≤ after`; waits `w` seconds when idle (≤ 55, default 25; clients ask for 50); a newer poll for `k` ends the older one |
 | `cx_tpub` | `{r: [record ≤ 32]}` → `{ok: [status], now}` | §6 |
 | `cx_tfind` | `{t: [id ≤ 16]}` → `{r, now}` | live records, ≤ 100 per topic, newest first |
-| `cx_twatch` | `{t: [id ≤ 64], c?}` → `{c, r, snap?, now}` | HTTP long poll, §6 |
+| `cx_twatch` | `{t: [id ≤ 64], c?, w?}` → `{c, r, snap?, now}` | HTTP long poll (`w` as in `cx_listen`), §6 |
 
 ## 5. Anchor book
 
@@ -83,7 +85,7 @@ Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabl
   - verified: `round(100 · ok · (0.6 + 0.4 · √min(1, days_known / 7)))`, where `ok` = `http` for browsers and `max(udp, http)` for natives
 - **Limits:** ≤ 1000 entries; drop when score < 10 and no success for 7 days.
 - **Every 10 min, anchors:** probe 64 entries (≤ 16 unverified) and pull `cx_anchors` from 3 random anchors.
-- **Peers:** keep 2 inbox anchors and re-verify every 10 min. Among anchors within 20 points of the best score, a peer takes the 2 XOR-closest to its own key, so peers spread over all good anchors. An inbox whose poll fails 3 times in a row is replaced and the Beacon republished. Bootstrap probes explicitly given anchors first, in rounds, until it has an inbox.
+- **Peers:** keep 2 inbox anchors; every 30 min they pull `cx_anchors` from one and re-verify. Among anchors within 20 points of the best score, a peer takes the 2 XOR-closest to its own key, so peers spread over all good anchors. An inbox whose poll fails 3 times in a row is replaced and the Beacon republished. Bootstrap probes explicitly given anchors first, in rounds, until it has an inbox.
 - **Bootstrap sources:**
   - cache, built-in list, explicit lines, any URL with anchor lines
   - TXT `_corvax-anchors.<domain>` (DoH JSON in browsers)
@@ -139,6 +141,7 @@ Each connection is standard WebRTC with negotiated DataChannels id 0 (payload) a
 ```
 {cx:"offer", sid, sdp, p: "app"|"relay"|"topic", tp?}   {cx:"answer", sid, sdp}   {cx:"busy", sid}   {cx:"cand", sid, c, m, i}
 ```
+To keep traffic through anchors low: candidates found within 150 ms ride inside the offer/answer SDP, and later ones go out in batches every 150 ms as `{cx:"cand", sid, cs: [[c, m, i] ≤ 32]}` when the other side has v ≥ 2 (an offer says `v: 2` itself). Beacons are cached for 10 min and re-read once when sending fails.
 `sid` = b64(9 random bytes). `relay` and `topic` connections are not handed to the app. Direct attempts time out after 10 s.
 
 **Through a third peer C** (fallback):
