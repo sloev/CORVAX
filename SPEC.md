@@ -70,7 +70,7 @@ Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabl
 | `cx_check` | `{k, port, hport}` → `{udp, http, ip, by}` | asks a different anchor (`cx_probe`) to `cx_hi` the caller |
 | `cx_probe` | `{ip, port, hport, k}` → `{udp, http}` | only for callers that are verified anchors |
 | `cx_send` | `{to, msg}` → `{queued}` | inbox: 120 s, ≤ 64 messages and ≤ 1 MB per key, deduplicated by SHA-256 |
-| `cx_listen` | `{k, ts, sig, after?}` → `{msgs: [{seq, msg}]}` | HTTP. `sig = Ed25519("cx-listen:" ‖ ts)`, ±300 s. `seq` = max(previous + 1, unix ms), so it keeps rising across anchor restarts. Deletes `seq ≤ after`; waits ≤ 25 s; a newer poll for `k` ends the older one |
+| `cx_listen` | `{k, ts, sig, after?}` → `{msgs: [{seq, msg}]}` | HTTP. With `v: 2`: `sig = Ed25519("cx-listen:" ‖ ts ‖ ":" ‖ after ‖ ":" ‖ z32 key of this anchor)`, so a poll can't be replayed at another anchor and its ack can't be forged (without `v`: the old `"cx-listen:" ‖ ts`, accepted for older clients). ±300 s. `seq` = max(previous + 1, unix ms), so it keeps rising across anchor restarts. Deletes `seq ≤ after`; waits ≤ 25 s; a newer poll for `k` ends the older one |
 | `cx_tpub` | `{r: [record ≤ 32]}` → `{ok: [status], now}` | §6 |
 | `cx_tfind` | `{t: [id ≤ 16]}` → `{r, now}` | live records, ≤ 100 per topic, newest first |
 | `cx_twatch` | `{t: [id ≤ 64], c?}` → `{c, r, snap?, now}` | HTTP long poll, §6 |
@@ -83,7 +83,7 @@ Errors: 201 generic · 202 rate limited · 203 protocol · 204 unknown or disabl
   - verified: `round(100 · ok · (0.6 + 0.4 · √min(1, days_known / 7)))`, where `ok` = `http` for browsers and `max(udp, http)` for natives
 - **Limits:** ≤ 1000 entries; drop when score < 10 and no success for 7 days.
 - **Every 10 min, anchors:** probe 64 entries (≤ 16 unverified) and pull `cx_anchors` from 3 random anchors.
-- **Peers:** keep 2 inbox anchors and re-verify every 10 min. Bootstrap probes explicitly given anchors first, in rounds, until it has an inbox.
+- **Peers:** keep 2 inbox anchors and re-verify every 10 min. Among anchors within 20 points of the best score, a peer takes the 2 XOR-closest to its own key, so peers spread over all good anchors. An inbox whose poll fails 3 times in a row is replaced and the Beacon republished. Bootstrap probes explicitly given anchors first, in rounds, until it has an inbox.
 - **Bootstrap sources:**
   - cache, built-in list, explicit lines, any URL with anchor lines
   - TXT `_corvax-anchors.<domain>` (DoH JSON in browsers)
@@ -145,7 +145,7 @@ Each connection is standard WebRTC with negotiated DataChannels id 0 (payload) a
 1. A → B: `{cx:"via?", sid, e: eph_a, via: [≤ 8 addresses], p, tp?}`.
 2. B → A: `{cx:"via", sid, e: eph_b, c}` or `{cx:"via-no", sid}`. B picks C: one it is connected to, otherwise the first it can reach directly.
 3. A and B each send C, on its `cx` channel, `{"cx":"bridge","sid","to"}`. C pairs requests with the same `sid` that name each other over two different connections, and answers `bridged` (or `bridge-no`); `unbridge` ends it.
-   **Last resort:** when no peer path exists, C may be an anchor with `rl: 1`, reached over a WebSocket at `GET /relay`. The client first sends `{"cx":"hello","k":b64(ed_pub),"ts","sig":b64(Ed25519("cx-relay:" ‖ ts))}` (±300 s), then the same bridge messages and frames as on a `cx` channel.
+   **Last resort:** when no peer path exists, C may be an anchor with `rl: 1`, reached over a WebSocket at `GET /relay`. The client first sends `{"cx":"hello","v":2,"k":b64(ed_pub),"ts","sig":b64(Ed25519("cx-relay:" ‖ ts ‖ ":" ‖ z32 key of this anchor))}` (±300 s; without `v` the old `"cx-relay:" ‖ ts`), then the same bridge messages and frames as on a `cx` channel.
 4. Frames: `sid 9 ‖ ctr 8 ‖ AES-256-GCM(K_dir, iv 0⁴ ‖ ctr, type ‖ data)`, with `K_a2b`/`K_b2a` = HKDF(X25519(eph_a, eph_b), "cx/relay" ‖ sid ‖ "a2b"/"b2a"). Counters only increase. C only sees ciphertext.
 
 **Topic links:**
@@ -213,3 +213,32 @@ Nearby devices extend the mesh without internet or an access point.
 - **BLE:** service `c0a40001-0c0a-4c58-8000-00000000c0a4`; advertisement service data = first 8 bytes of the public key. Characteristic `…0002` (write without response) and `…0003` (notify) carry KRPC (§3) in chunks: `seq (1 B) ‖ flags (1 B: 1 = last) ‖ payload ≤ MTU − 5`; a message is ≤ 16 KB. Used for presence, messages and signalling; bulk data moves to Wi-Fi. Hosts present a BLE peer to the core as the UDP address `ble:<id>`, so the DHT and every query run over BLE unchanged.
 - **Wi-Fi Direct:** DNS-SD service `_corvax._udp` with one TXT string, the node's anchor line for the group address. Group members then speak UDP, HTTP and WebRTC over the group network.
 - Found peers enter the anchor book as LAN entries (never shared). Offline, nearby nodes answer `get` from the Beacons they hold.
+
+## 13. Mesh services: every peer is a small anchor
+
+What an anchor does over HTTP, every peer also does for the peers connected to it, as KRPC over WebRTC (§3). A network of connected peers therefore keeps working with no anchor at all.
+
+| Query (over any connection's `cx` channel or a relayed topic link) | Every peer answers |
+|---|---|
+| `get {k}` / `put {k, seq, sig, v}` | Beacons it holds (≤ 512, newest `seq` wins, verified). On every new connection both sides `put` their own Beacon |
+| `cx_anchors {}` | its shared anchor list; both sides ask on connect, so anchor lists spread peer to peer |
+| `cx_send {to, msg}` | `to` is itself: delivered. `to` is connected to it: passed on once (≤ 100 per 10 s; never if `relayFor` is off). Otherwise error 204 |
+| `cx_tpub`, `cx_tfind` | topic storage (§6); publishers store on every connected peer too, and searches ask them |
+
+**Clients:**
+- **`resolve`:** asks anchors and connected peers together; the newest valid Beacon wins.
+- **Sending a message** (§2):
+  1. over an open connection to the recipient
+  2. else to an inbox anchor from its Beacon
+  3. else through any connected peer that is connected to the recipient
+- **`publish`** succeeds when an anchor or a connected peer takes the Beacon.
+
+Signalling (§7) uses messages, so two peers that share only a mutual peer can connect through it, and stay connected when it leaves.
+
+**By hand** (no anchor, no network service): two codes carried over any medium make a direct connection.
+```
+code = "cx1" ‖ b64(bencode { k: ed_pub, sid, sdp, to, sig })     sig = Ed25519("cx-hand" ‖ bencode{ k, sid, sdp, to })
+```
+The invitation has an offer SDP with all ICE candidates and empty `to`; the reply has the answer SDP, the same `sid`, and `to` = the inviter's key. About 1,000 characters each.
+
+**Any medium:** a Beacon as text is `"cxb" ‖ b64(ed_pub ‖ Beacon wire)`; a sealed message (§2) as text is `"cxm" ‖ b64(wire)`.

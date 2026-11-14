@@ -23,7 +23,9 @@ export const unpack = (pub, b) => ({ pub, sig: b.slice(0, 64), seq: readU64(b.su
 
 export function fields (r) {
   const out = {}
-  for (const t of dnsDecode(r.v)) {
+  let txts = []
+  try { txts = dnsDecode(r.v) } catch {}                           // a malformed (but signed) packet reads as empty
+  for (const t of txts) {
     const i = t.indexOf('=')
     if (i > 0) (out[t.slice(0, i)] ??= []).push(t.slice(i + 1))
   }

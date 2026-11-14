@@ -143,7 +143,7 @@ async function online () {
     try { seed = localStorage.getItem('corvax.seed') } catch {}
     me = window.corvax = await Peer.create({ seed, allowPrivate: local, local: !!app.useLocal })   // useLocal: a CORVAX node on this device
     try { localStorage.setItem('corvax.seed', me.seed) } catch {}
-    await me.publish(app.name ? { n: app.name } : {})
+    await me.publish(app.name ? { n: app.name } : {}).catch(() => {})     // no anchor in reach: still usable by hand (Peers)
     app.live = true; save()
     ui.status = 'online'
     wire()
@@ -248,7 +248,29 @@ function peers () {
   const list = Object.keys(app.contacts).sort((x, y) => ['connected', 'recent', 'unseen'].indexOf(presence(x)) - ['connected', 'recent', 'unseen'].indexOf(presence(y)))
   return h('section', {},
     h('div', { class: 'row' }, input, h('button', { class: 'btn primary', onclick: attempt(() => { ui.peer = addContact(input.value); toast('Peer added') }) }, 'Add')),
-    list.length ? peerList(list) : h('p', { class: 'empty' }, 'Add a peer by their address, or share your invite link from Home.'))
+    list.length ? peerList(list) : h('p', { class: 'empty' }, 'Add a peer by their address, or share your invite link from Home.'),
+    byHand())
+}
+
+// No network at all? Two codes, carried any way you like (paste, QR, read aloud), connect two peers directly.
+const hand = { invite: null, code: '' }
+function byHand () {
+  const theirs = h('input', { placeholder: 'Their code', 'data-keep': 'hand', 'aria-label': 'Their code' })
+  const linked = ({ address, channel }) => { addContact(address); attachChannel(address, channel); hand.invite = null; hand.code = ''; toast('Linked by hand'); render() }
+  const make = attempt(async () => { hand.invite = await me.link(); hand.code = hand.invite.code })
+  const use = attempt(async () => {
+    const code = theirs.value.trim()
+    theirs.value = ''
+    if (hand.invite) { try { return linked(await hand.invite.accept(code)) } catch (e) { if (e.code !== 'bad-code') throw e } }
+    const reply = await me.link(code)                                   // their invitation: answer it
+    hand.code = reply.code
+    reply.connected.then(({ address }) => { addContact(address); hand.code = ''; toast('Linked by hand'); render() }, () => {})   // accept() attached the channel
+  })
+  return h('section', {},
+    h('h3', {}, 'Link by hand'),
+    h('p', { class: 'small mute' }, 'Works with no internet and no anchors: one of you makes a code, the other pastes it and sends back the reply code.'),
+    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: make }, 'Make a code'), theirs, h('button', { class: 'btn', onclick: use }, 'Use')),
+    hand.code && h('div', { class: 'row' }, h('code', { class: 'small', style: 'flex:1;max-height:4.5em;overflow:auto', 'aria-label': 'Your code' }, hand.code), h('button', { class: 'btn', onclick: () => copy(hand.code, 'Code') }, 'Copy code')))
 }
 
 function peerView (a) {
@@ -450,7 +472,25 @@ me.addAnchors(await res.text())`],
 
 const room = joinRoom({ appId: 'my-app' }, 'lobby')
 room.onPeerJoin(({ peerId }) => console.log(peerId))`],
-  [['Errors'], 'Failures are CorvaxError with a code: no-anchor, not-found, timeout, no-answer, ice-failed, no-relay, busy, no-storage, not-published, too-large, rate-limited, no-webrtc, unsupported, closed.',
+  [['me.link() → Promise<{ code, accept(reply) }>', 'me.link(code) → Promise<{ code, connected }>'], 'Connects two peers by hand, with no anchor and no network service: one makes a code, the other answers it with a reply code. Carry the codes any way you like (paste, QR, read aloud); each is about 1,000 characters. Once linked, the two peers serve each other as anchors do: Beacons, messages, topic records, and introductions to their other peers.',
+`// Alice
+const invite = await me.link()
+show(invite.code)
+
+// Bob
+const reply = await me.link(codeFromAlice)
+show(reply.code)
+const { channel } = await reply.connected
+
+// Alice
+const { channel } = await invite.accept(codeFromBob)`],
+  [['me.card() → Promise<string>', 'me.learn(card) → Promise<address>', 'me.envelope(address, body) → Promise<string>', 'me.receive(text)'], 'Messages over any medium. A card is your signed record as text; an envelope is a sealed, signed message as text. Send them by e-mail, QR or paper; receive() delivers to your me.on handlers.',
+`const bob = await me.learn(bobsCard)
+const text = await me.envelope(bob, { hi: 'on paper' })
+
+// Bob, later
+await me.receive(text)`],
+  [['Errors'], 'Failures are CorvaxError with a code: no-anchor, not-found, timeout, no-answer, ice-failed, no-relay, busy, no-storage, not-published, too-large, rate-limited, no-webrtc, bad-code, unsupported, closed.',
 `try {
   await me.connect(address)
 } catch (e) {
@@ -491,7 +531,7 @@ function dox () {
   return h('article', {},
     live(),
     h('p', { class: 'lead' }, 'CORVAX lets people and programs find each other by a key or a topic and talk directly. No account, and no central server required.'),
-    h('ul', {}, ['Your address is a key made in your browser. Nothing to sign up for.', 'Messages are end-to-end encrypted; connections are direct WebRTC, or relayed by another peer.', 'Anchors only introduce peers; they are ordinary peers anyone can run, never in the data path.'].map(t => h('li', {}, t))),
+    h('ul', {}, ['Your address is a key made in your browser. Nothing to sign up for.', 'Messages are end-to-end encrypted; connections are direct WebRTC, or relayed by another peer.', 'Anchors only introduce peers; they are ordinary peers anyone can run, never in the data path.', 'No anchor in reach? Connected peers do the same job for each other, and two peers can link by hand with two short codes.'].map(t => h('li', {}, t))),
     diagram(),
     h('p', {}, h('button', { class: 'btn primary', onclick: () => { ui.view = 'app'; store.set('corvax.view', 'app'); render() } }, 'Try it'), ' or build with it.'),
     h('h2', {}, 'Example: a live visitor counter'),

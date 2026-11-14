@@ -77,6 +77,21 @@ const room = joinRoom({ appId: 'my-app' }, 'lobby')
 
 Members are found by CORVAX presence, and signals travel over the room's own mesh when they can, so rooms keep re-signalling with no anchor at all. Two browsers join in about 0.3 s.
 
+### No anchors? Still works
+
+Every peer does for its connected peers what an anchor does: it keeps their Beacons, passes messages on, stores topic records and shares its anchor list. Two peers with one mutual peer can find each other and connect through it.
+
+With no network service at all, link two peers by hand. The codes are about 1,000 characters: paste them, show them as QR, read them out.
+
+```js
+const invite = await alice.link()                // alice → bob: invite.code
+const reply = await bob.link(invite.code)        // bob → alice: reply.code
+const { channel } = await invite.accept(reply.code)
+
+const text = await alice.envelope(bobAddress, { hi: 1 })   // a sealed message as text, for any medium
+await bob.receive(text)                                    // (after alice.learn(await bob.card()))
+```
+
 ### A node on this device
 
 Apps find a CORVAX node running on the same device (`http://127.0.0.1:4799`) by themselves and use it first: native runtimes by default, browsers with `Peer.create({ local: true })`.

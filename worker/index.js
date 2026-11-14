@@ -45,7 +45,7 @@ export class Anchor extends DurableObject {
       const seed = env.CORVAX_SEED || await ctx.storage.get('seed') || hex(random(32))
       await ctx.storage.put('seed', seed)
       this.id = await identity(unhex(seed))
-      this.key = z32(this.id.pub)
+      this.key = this.relayHost.address = z32(this.id.pub)
       this.book.add(await ctx.storage.get('book') || '')
       // Topic records outlive eviction: every accepted record (and tombstone) is kept in SQLite until it lapses.
       ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS topics (t TEXT, k TEXT, raw BLOB, exp INTEGER, PRIMARY KEY (t, k))')
@@ -114,8 +114,10 @@ export class Anchor extends DurableObject {
     }
     if (q === 'cx_listen') {
       if (!(a.k instanceof Uint8Array) || a.k.length !== 32 || typeof a.ts !== 'number' || Math.abs(Date.now() - a.ts) > 300e3) throw [203, 'bad listen']
-      if (!await verify(a.k, a.sig, utf8(`cx-listen:${a.ts}`))) throw [206, 'bad signature']
-      return { msgs: await this.inboxes.listen(a.k, typeof a.after === 'number' ? a.after : 0, signal) }
+      const after = typeof a.after === 'number' ? a.after : 0
+      // v 2 binds the poll to this anchor and to its ack; the old form stays for older clients
+      if (!await verify(a.k, a.sig, utf8(a.v === 2 ? `cx-listen:${a.ts}:${after}:${this.key}` : `cx-listen:${a.ts}`))) throw [206, 'bad signature']
+      return { msgs: await this.inboxes.listen(a.k, after, signal) }
     }
     if (q === 'cx_twatch') {
       const t = Array.isArray(a.t) ? a.t.filter(b => b instanceof Uint8Array && b.length === 32).slice(0, 64) : []

@@ -140,8 +140,10 @@ export function handler (node) {
     }
     if (q === 'cx_listen') {
       if (!(a.k instanceof Uint8Array) || a.k.length !== 32 || typeof a.ts !== 'number' || Math.abs(Date.now() - a.ts) > 300e3) throw [203, 'bad listen']
-      if (!await verify(a.k, a.sig, utf8(`cx-listen:${a.ts}`))) throw [206, 'bad signature']
-      return poll(from.host, async () => ({ msgs: await node.inboxes.listen(a.k, typeof a.after === 'number' ? a.after : 0, signal) }))
+      const after = typeof a.after === 'number' ? a.after : 0
+      // v 2 binds the poll to this anchor and to its ack; the old form stays for older clients
+      if (!await verify(a.k, a.sig, utf8(a.v === 2 ? `cx-listen:${a.ts}:${after}:${node.key}` : `cx-listen:${a.ts}`))) throw [206, 'bad signature']
+      return poll(from.host, async () => ({ msgs: await node.inboxes.listen(a.k, after, signal) }))
     }
     return node.dht.answer(q, a, from)
   }

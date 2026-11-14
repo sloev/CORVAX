@@ -1,7 +1,9 @@
 // Direct connections: plain WebRTC offer/answer, carried as signed+encrypted messages.
 // Every connection has two pre-agreed DataChannels: id 0 "app" (handed to the app) and
 // id 1 "cx" (control: used to relay for others).
-import { b64, random, fail } from './bytes.js'
+import { b64, unb64, random, fail, utf8, str, concat, equal, z32, unz32 } from './bytes.js'
+import { encode, decode } from './bencode.js'
+import { sign, verify } from './crypto.js'
 import * as relay from './relay.js'
 
 
@@ -19,6 +21,7 @@ const opened = ch => new Promise(resolve => {
 function session (peer, address, sid, beacon) {
   const s = peer.sessions.get(sid) || { queue: [] }
   peer.sessions.set(sid, s)
+  s.address = address
   s.pc = new peer.RTC({ iceServers: peer.iceServers() })
   s.app = s.pc.createDataChannel('app', { negotiated: true, id: 0 })
   s.ctl = s.pc.createDataChannel('cx', { negotiated: true, id: 1 })
@@ -26,7 +29,7 @@ function session (peer, address, sid, beacon) {
   s.open = Promise.all([opened(s.app), opened(s.ctl)])
   s.pc.onicecandidate = e => {
     const c = e.candidate
-    if (c?.candidate) peer.signal(address, { cx: 'cand', sid, c: c.candidate, m: c.sdpMid ?? '0', i: c.sdpMLineIndex ?? 0 }, beacon).catch(() => {})
+    if (c?.candidate && address) peer.signal(address, { cx: 'cand', sid, c: c.candidate, m: c.sdpMid ?? '0', i: c.sdpMLineIndex ?? 0 }, beacon).catch(() => {})
   }
   setTimeout(() => { if (peer.sessions.get(sid) === s) peer.sessions.delete(sid) }, 60e3).unref?.()
   return s
@@ -42,6 +45,7 @@ function register (peer, address, s) {
   s.ctl.onmessage = e => relay.onControl(peer, conn, e.data)
   const gone = () => { if (peer.conns.get(address) === conn) peer.conns.delete(address); relay.onClosed(peer, conn) }
   s.ctl.onclose = gone
+  peer.greet(s.ctl).catch(() => {})                       // mesh: swap Beacons and anchor lists
   return conn
 }
 
@@ -72,14 +76,21 @@ export async function direct (peer, address, { timeout = 10000, purpose = 'app',
 export async function onSignal (peer, from, body) {
   const sid = String(body.sid || '')
   if (!sid || sid.length > 24) return
+  // A session belongs to one address: only that peer may answer it or add candidates to it.
+  const mine = peer.sessions.get(sid), theirs = mine?.address === from ? mine : null
   if (body.cx === 'cand') {
-    const s = peer.sessions.get(sid) || peer.sessions.set(sid, { queue: [] }).get(sid)
+    let s = theirs
+    if (!s) {                                              // candidates can arrive before their offer: hold a few, briefly
+      if (mine || [...peer.sessions.values()].filter(x => !x.pc).length >= 32) return
+      peer.sessions.set(sid, s = { queue: [], address: from })
+      setTimeout(() => { if (peer.sessions.get(sid) === s && !s.pc) peer.sessions.delete(sid) }, 30e3).unref?.()
+    }
     if (s.queue.length < 64) s.queue.push({ c: String(body.c), m: body.m, i: body.i })
     return flush(s)
   }
-  if (body.cx === 'answer') return peer.sessions.get(sid)?.answered?.(String(body.sdp))
-  if (body.cx === 'busy') return peer.sessions.get(sid)?.busy?.()
-  if (body.cx !== 'offer' || !peer.RTC || peer.sessions.get(sid)?.pc) return
+  if (body.cx === 'answer') return theirs?.answered?.(String(body.sdp))
+  if (body.cx === 'busy') return theirs?.busy?.()
+  if (body.cx !== 'offer' || !peer.RTC || mine?.pc || (mine && !theirs)) return
   const purpose = ['relay', 'topic'].includes(body.p) ? body.p : 'app'
   const tp = purpose === 'topic' ? String(body.tp || '') : null
   const busy = () => peer.signal(from, { cx: 'busy', sid }).catch(() => {})
@@ -98,4 +109,59 @@ export async function onSignal (peer, from, body) {
   const conn = register(peer, from, s)
   if (purpose === 'topic') return peer.topics.attach(from, tp, conn.app, 'direct')
   if (purpose === 'app') for (const fn of peer.acceptors) fn({ from, channel: conn.app, pc: conn.pc, kind: 'direct' })
+}
+
+// ---- by hand (SPEC §13) -------------------------------------------------------------------------
+// Two short texts, carried over any medium (paste, QR, voice, paper), make a connection with no anchor and no
+// network service: code = "cx1" ‖ b64(bencode{ k, sid, sdp, to, sig }), sig = Ed25519("cx-hand" ‖ bencode{ k, sid, sdp, to }).
+const gathered = pc => new Promise(resolve => {             // all ICE candidates are in the SDP (or 4 s passed)
+  const timer = setTimeout(resolve, 4000)
+  pc.onicecandidate = e => { if (!e.candidate) { clearTimeout(timer); resolve() } }
+  if (pc.iceGatheringState === 'complete') { clearTimeout(timer); resolve() }
+})
+async function handCode (peer, sid, sdp, to = new Uint8Array(0)) {
+  const body = { k: peer.id.pub, sid: utf8(sid), sdp: utf8(sdp), to }
+  return 'cx1' + b64(encode({ ...body, sig: await sign(peer.id, concat(utf8('cx-hand'), encode(body))) }))
+}
+async function readCode (code) {
+  const text = String(code).trim()
+  let m
+  try { m = decode(unb64(text.slice(3))) } catch {}
+  const bytes = (x, n) => x instanceof Uint8Array && (n === undefined || x.length === n)
+  if (!text.startsWith('cx1') || !m || !bytes(m.k, 32) || !bytes(m.sid) || !bytes(m.sdp) || !bytes(m.to) || !bytes(m.sig, 64) ||
+      !await verify(m.k, m.sig, concat(utf8('cx-hand'), encode({ k: m.k, sid: m.sid, sdp: m.sdp, to: m.to })))) throw fail('bad-code', 'not a valid link code')
+  return { address: z32(m.k), sid: str(m.sid), sdp: str(m.sdp), to: m.to }
+}
+const result = (conn, address) => ({ channel: conn.app, pc: conn.pc, kind: 'direct', address })
+
+export async function hand (peer, code) {
+  if (!peer.RTC) throw fail('no-webrtc', 'no RTCPeerConnection available (pass one to Peer.create)')
+  const sid = code ? null : b64(random(9)), o = code && await readCode(code)
+  if (o?.to.length) throw fail('bad-code', 'this is a reply; give it to accept()')
+  const s = session(peer, null, sid || o.sid)
+  peer.sessions.delete(sid || o.sid)                         // nothing arrives by message for this one
+  if (!code) {
+    await s.pc.setLocalDescription(await s.pc.createOffer())
+    await gathered(s.pc)
+    return {
+      code: await handCode(peer, sid, s.pc.localDescription.sdp),
+      accept: async reply => {
+        const r = await readCode(reply)
+        if (r.sid !== sid || !equal(r.to, peer.id.pub)) throw fail('bad-code', 'this reply answers another code')
+        await s.pc.setRemoteDescription({ type: 'answer', sdp: r.sdp })
+        await withTimeout(s.open, 30000, 'ice-failed')
+        return result(register(peer, r.address, s), r.address)
+      }
+    }
+  }
+  await s.pc.setRemoteDescription({ type: 'offer', sdp: o.sdp })
+  await s.pc.setLocalDescription(await s.pc.createAnswer())
+  await gathered(s.pc)
+  const connected = withTimeout(s.open, 600e3, 'ice-failed').then(() => {
+    const conn = register(peer, o.address, s)
+    for (const fn of peer.acceptors) fn({ from: o.address, channel: conn.app, pc: conn.pc, kind: 'direct' })
+    return result(conn, o.address)
+  })
+  connected.catch(() => { try { s.pc.close() } catch {} })
+  return { code: await handCode(peer, o.sid, s.pc.localDescription.sdp, unz32(o.address)), connected }
 }

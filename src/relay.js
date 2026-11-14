@@ -44,7 +44,7 @@ async function wsTo (peer, key) {
   ws.binaryType = 'arraybuffer'
   await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(fail('no-relay', 'relay socket failed')) })
   const ts = Date.now()
-  ws.send(JSON.stringify({ cx: 'hello', k: b64(peer.id.pub), ts, sig: b64(await sign(peer.id, utf8(`cx-relay:${ts}`))) }))
+  ws.send(JSON.stringify({ cx: 'hello', v: 2, k: b64(peer.id.pub), ts, sig: b64(await sign(peer.id, utf8(`cx-relay:${ts}:${key}`))) }))   // names this anchor: no replay elsewhere
   const conn = { address: key, ctl: { send: d => ws.send(d) }, ws }
   ws.onmessage = ev => onControl(peer, conn, ev.data)
   ws.onclose = () => { if (peer.wsRelays.get(key) === conn) peer.wsRelays.delete(key); onClosed(peer, conn) }
@@ -61,7 +61,7 @@ export function serveSocket (host, ws) {
     let m
     try { m = JSON.parse(data) } catch { return ws.close() }
     const k = typeof m.k === 'string' ? unb64(m.k) : null
-    if (m.cx !== 'hello' || k?.length !== 32 || Math.abs(Date.now() - m.ts) > 300e3 || !await verify(k, unb64(String(m.sig)), utf8(`cx-relay:${m.ts}`))) return ws.close()
+    if (m.cx !== 'hello' || k?.length !== 32 || Math.abs(Date.now() - m.ts) > 300e3 || !await verify(k, unb64(String(m.sig)), utf8(m.v === 2 ? `cx-relay:${m.ts}:${host.address}` : `cx-relay:${m.ts}`))) return ws.close()
     conn.address = z32(k)
   }).catch(() => {}) }
   ws.onclose = () => onClosed(host, conn)

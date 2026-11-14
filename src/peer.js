@@ -3,11 +3,11 @@
 // DataChannels (direct, or relayed by a third peer). Uses only fetch + WebCrypto + WebRTC,
 // so the same file runs in browsers, Node, Bun and Deno.
 import { identity, supported, sign, sha1, hiOk } from './crypto.js'
-import { seal, open, MAX_AGE } from './message.js'
-import { makeBeacon, verifyBeacon, fields } from './record.js'
+import { seal, open, MAX_AGE, MAX_MESSAGE } from './message.js'
+import { makeBeacon, verifyBeacon, fields, pack, unpack } from './record.js'
 import { encode, decode } from './bencode.js'
 import { Book, parseLine, formatLine } from './book.js'
-import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, equal, fail, sleep, CorvaxError } from './bytes.js'
+import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, equal, fail, sleep, concat, xor, compare, readCapped, CorvaxError } from './bytes.js'
 export { CorvaxError }
 import * as rtc from './rtc.js'
 import * as relay from './relay.js'
@@ -39,6 +39,8 @@ export class Peer {
     p.acceptors = new Set()
     p.seen = new Map()                       // message id -> time (replay protection)
     p.beacons = new Map()                    // address -> { beacon, t }
+    p.held = new Map()                       // address -> signed Beacon record, served to neighbours (mesh)
+    p.listen = o.listen !== false            // false = never receives messages
     p.conns = new Map()                      // address -> open direct connection { pc, app, ctl }
     p.wsRelays = new Map()                   // anchor key -> WebSocket relay connection (last resort)
     p.sessions = new Map()                   // sid -> WebRTC negotiation state
@@ -53,7 +55,7 @@ export class Peer {
     p.store = o.store !== undefined ? o.store : o.storage === false ? null : new TopicStore()
     if (p.store && o.store === undefined) { p.sweeper = setInterval(() => p.store.sweep(), 30e3); p.sweeper.unref?.() }
     await p.bootstrap(o)
-    if (o.listen !== false) for (const ib of p.inboxes) p.#poll(ib)   // listen: false = never receives messages
+    if (p.listen) for (const ib of p.inboxes) p.#poll(ib)
     return p
   }
 
@@ -99,7 +101,18 @@ export class Peer {
   async refresh () {
     await Promise.allSettled(this.inboxes.map(ib => this.rpc(ib.url, 'cx_anchors', {}).then(r => this.book.add(str(r.a)))))
     await this.verify(16)
+    this.#rehome()
     this.platform.saveCache?.(this.book.toText())
+  }
+  // Keep 2 working inboxes: drop ones whose polls keep failing, take new ones, and tell the world.
+  #rehome () {
+    const alive = this.inboxes.filter(ib => (ib.fails || 0) < 3)
+    const next = [...alive, ...this.#chooseInboxes().filter(n => !this.inboxes.some(ib => ib.entry.key === n.entry.key))].slice(0, 2)
+    const added = next.filter(n => !this.inboxes.includes(n))
+    if (!added.length && next.length === this.inboxes.length) return
+    this.inboxes = next
+    if (this.listen) for (const ib of added) this.#poll(ib)
+    if (this.beaconSeq) this.publish().catch(() => {})
   }
 
   // Probe entries: does the anchor answer, and does it hold the key in its line?
@@ -127,8 +140,12 @@ export class Peer {
   #chooseInboxes () {
     if (this.self) return [{ entry: this.book.get(this.self.key), url: this.self.url }]
     const local = this.local && this.book.get(this.local), pick = local?.verified && this.urlOf(local) ? [local] : []
-    return [...pick, ...this.book.best(2, isBrowser ? 'browser' : 'native', e => e.verified && this.urlOf(e) && e !== local)].slice(0, 2)
-      .map(entry => ({ entry, url: this.urlOf(entry) }))
+    // Among the good anchors (within 20 points of the best), take the ones closest to our own key: every peer
+    // gets a stable choice, and peers spread over all good anchors instead of piling onto the top two.
+    const mode = isBrowser ? 'browser' : 'native', pool = this.book.best(16, mode, e => e.verified && this.urlOf(e) && e !== local)
+    const good = pool.filter(e => this.book.score(e, mode) >= this.book.score(pool[0], mode) - 20)
+      .sort((a, b) => compare(xor(unz32(a.key), this.id.pub), xor(unz32(b.key), this.id.pub)))
+    return [...pick, ...good].slice(0, 2).map(entry => ({ entry, url: this.urlOf(entry) }))
   }
   // STUN: anchors proven to answer UDP, plus public fallbacks (HTTPS-only anchors, like Workers, can't do STUN)
   iceServers () {
@@ -154,13 +171,17 @@ export class Peer {
     }
   }
 
-  async publish (extra = {}) {
-    if (!this.inboxes.length) throw fail('no-anchor', 'no verified anchor to publish through')
-    const rec = await makeBeacon(this.id, { ...extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
+  // Anchors put the Beacon in the DHT; connected peers keep a copy and answer for it (mesh, SPEC §13).
+  async publish (extra = this.extra || {}) {
+    this.extra = extra
+    const near = this.neighbours()
+    if (!this.inboxes.length && !near.length) throw fail('no-anchor', 'no verified anchor or connected peer to publish through')
+    const rec = this.mine = await makeBeacon(this.id, { ...extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
     const targets = [...this.inboxes.map(ib => ib.url), ...this.book.best(2, 'native', e => e.verified).map(e => this.urlOf(e))]
-    const ok = await Promise.allSettled([...new Set(targets.filter(Boolean))].map(u =>
-      this.rpc(u, 'put', { k: rec.pub, seq: rec.seq, sig: rec.sig, v: rec.v })))
-    if (!ok.some(r => r.status === 'fulfilled')) throw fail('no-anchor', 'no anchor accepted the beacon')
+    const put = { k: rec.pub, seq: rec.seq, sig: rec.sig, v: rec.v }
+    const ok = await Promise.allSettled([...[...new Set(targets.filter(Boolean))].map(u => this.rpc(u, 'put', put)),
+      ...near.map(n => this.chanRpc(n.ch, 'put', put, 5000))])
+    if (!ok.some(r => r.status === 'fulfilled')) throw fail('no-anchor', 'no anchor or peer accepted the beacon')
     this.beaconSeq = rec.seq
     clearTimeout(this.republish)
     this.republish = setTimeout(() => this.publish(extra).catch(() => {}), REPUBLISH)
@@ -173,14 +194,17 @@ export class Peer {
     if (cached && !fresh && Date.now() - cached.t < 30e3) return cached.beacon
     const pub = unz32(address), target = await sha1(pub)
     const urls = [...new Set([...this.inboxes.map(ib => ib.url), ...this.book.best(3, 'native', e => e.verified).map(e => this.urlOf(e))].filter(Boolean))].slice(0, 3)
-    let best = null
-    await Promise.allSettled(urls.map(async u => {
-      const r = await this.rpc(u, 'get', { target, k: pub })       // k lets HTTPS-only anchors ask a pkarr relay
+    let best = this.held.get(address) || null
+    const take = async r => {
       if (!r.v || !(r.k instanceof Uint8Array) || !equal(r.k, pub)) return
       const rec = { pub, seq: r.seq, sig: r.sig, v: r.v }
       if ((!best || rec.seq > best.seq) && await verifyBeacon(rec)) best = rec
-    }))
+    }
+    await Promise.allSettled([
+      ...urls.map(u => this.rpc(u, 'get', { target, k: pub }).then(take)),       // k lets HTTPS-only anchors ask a pkarr relay
+      ...this.neighbours().map(n => this.chanRpc(n.ch, 'get', { target, k: pub }, 4000).then(take))])   // and connected peers
     if (!best) return null
+    this.#hold(best)
     const f = fields(best)
     const beacon = { address, seq: best.seq, x: f.x?.[0] && unb64(f.x[0]), c: f.c || [], fields: f }
     for (const line of beacon.c) this.book.add(line)
@@ -192,14 +216,89 @@ export class Peer {
     beacon ??= await this.resolve(address)
     if (!beacon?.x) throw fail('not-found', `no record for ${address}`)
     const to = unz32(address), msg = await seal(this.id, to, beacon.x, body)
+    const pass = n => this.chanRpc(n.ch, 'cx_send', { to, msg }, 5000)
+    const direct = this.neighbours(64).find(n => n.address === address)       // 1. an open connection to them: no anchor
+    if (direct) try { await pass(direct); return true } catch {}
     let last = 'no usable anchor line'
-    for (const line of beacon.c) {
+    for (const line of beacon.c) {                                             // 2. their inbox anchors
       const e = parseLine(line), url = e && this.urlOf(e)
       if (!url) continue
       try { await this.rpc(url, 'cx_send', { to, msg }); return true } catch (err) { last = err.message }
     }
+    const via = await Promise.allSettled(this.neighbours().filter(n => n !== direct).map(pass))   // 3. a peer we share with them
+    if (via.some(r => r.status === 'fulfilled')) return true
     throw fail('no-anchor', `no inbox of ${address} is reachable (${last})`)
   }
+
+  // ---- mesh services (SPEC §13): every peer is a small anchor for the peers connected to it ----------------
+  // Open channels that speak KRPC: the control channel of each connection, and relayed topic links.
+  neighbours (n = 8) {
+    const out = []
+    for (const c of this.conns.values()) if (c.ctl.readyState === 'open') out.push({ address: c.address, ch: c.ctl })
+    for (const l of this.topics.links.values()) if (l.kind === 'peer' && l.channel.readyState === 'open' && !out.some(x => x.address === l.address)) out.push({ address: l.address, ch: l.channel })
+    return out.slice(0, n)
+  }
+  #hold (rec) {
+    const a = z32(rec.pub), old = this.held.get(a)
+    if (old && old.seq >= rec.seq) return
+    this.held.delete(a); this.held.set(a, rec)
+    this.beacons.delete(a)
+    if (this.held.size > 512) this.held.delete(this.held.keys().next().value)
+  }
+  // On every new connection: hand over our Beacon and swap anchor lists, so both spread without any server.
+  async greet (ch) {
+    const m = this.mine ||= await makeBeacon(this.id, { ...this.extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
+    this.chanRpc(ch, 'put', { k: m.pub, seq: m.seq, sig: m.sig, v: m.v }, 5000).catch(() => {})
+    this.chanRpc(ch, 'cx_anchors', {}, 5000).then(async r => {
+      if (!this.book.add(str(r.a)).length) return
+      await this.verify(8)
+      this.#rehome()
+    }).catch(() => {})
+  }
+  // get / put: Beacons we hold · cx_anchors: our anchor list · cx_send: deliver to us, or pass on to a peer connected to us
+  async #mesh (q, a) {
+    const key = b => b instanceof Uint8Array && b.length === 32
+    if (q === 'get') {
+      const rec = key(a.k) && (equal(a.k, this.id.pub) ? this.mine : this.held.get(z32(a.k)))
+      return rec ? { k: rec.pub, seq: rec.seq, sig: rec.sig, v: rec.v } : {}
+    }
+    if (q === 'put') {
+      const rec = { pub: a.k, seq: a.seq, sig: a.sig, v: a.v }
+      if (!key(a.k) || !Number.isSafeInteger(a.seq) || !(a.v instanceof Uint8Array) || !await verifyBeacon(rec)) throw [206, 'bad signature']
+      this.#hold(rec)
+      return {}
+    }
+    if (q === 'cx_anchors') return { a: this.anchors() }
+    if (!key(a.to) || !(a.msg instanceof Uint8Array) || a.msg.length > MAX_MESSAGE) throw [203, 'bad message']
+    if (equal(a.to, this.id.pub)) { this.#onWire(a.msg); return { queued: 1 } }
+    const next = this.relayFor && this.neighbours(64).find(n => n.address === z32(a.to)), now = Date.now()
+    this.passed = (this.passed || []).filter(t => now - t < 10e3)
+    if (!next || this.passed.length >= 100) throw [204, 'not connected to that peer']      // ≤ 100 passed on per 10 s
+    this.passed.push(now)
+    this.chanRpc(next.ch, 'cx_send', { to: a.to, msg: a.msg }, 5000).catch(() => {})
+    return { queued: 1 }
+  }
+
+  // ---- by hand (SPEC §13): no anchors, no network services ----------------------------------------------
+  // link() → { code, accept(reply) } · link(code) → { code: reply, connected }. Carry the two codes any way you like.
+  link (code) { return rtc.hand(this, code) }
+  // Your Beacon as text; learn() someone else's. Then envelope() seals a message as text and receive() opens one.
+  async card () {
+    const m = this.mine ||= await makeBeacon(this.id, { ...this.extra, c: this.inboxes.map(ib => formatLine(ib.entry)) })
+    return 'cxb' + b64(concat(m.pub, pack(m)))
+  }
+  async learn (card) {
+    const b = unb64(String(card).trim().slice(3)), rec = unpack(b.slice(0, 32), b.subarray(32))
+    if (!String(card).trim().startsWith('cxb') || b.length < 104 || !await verifyBeacon(rec)) throw fail('bad-code', 'not a valid card')
+    this.#hold(rec)
+    return z32(rec.pub)
+  }
+  async envelope (address, body) {
+    const beacon = await this.resolve(address)
+    if (!beacon?.x) throw fail('not-found', `no record for ${address}`)
+    return 'cxm' + b64(await seal(this.id, unz32(address), beacon.x, { app: body }))
+  }
+  receive (text) { return this.#onWire(unb64(String(text).trim().slice(3))) }
   send (address, body) { return this.signal(address, { app: body }) }
   on (fn) { this.handlers.add(fn); return () => this.handlers.delete(fn) }
 
@@ -225,16 +324,19 @@ export class Peer {
   }
 
   async #poll (ib) {
-    let after = 0, fails = 0
-    while (!this.abort.signal.aborted) {
+    let after = 0
+    while (!this.abort.signal.aborted && this.inboxes.includes(ib)) {
       try {
-        const ts = Date.now(), sig = await sign(this.id, utf8(`cx-listen:${ts}`))
-        const r = await this.rpc(ib.url, 'cx_listen', { k: this.id.pub, ts, sig, after }, { timeout: 35000, retries: 0 })
-        fails = 0
+        // v 2: the signature names this anchor and the ack, so nobody can replay a poll elsewhere or forge an ack
+        const ts = Date.now(), sig = await sign(this.id, utf8(`cx-listen:${ts}:${after}:${ib.entry.key}`))
+        const r = await this.rpc(ib.url, 'cx_listen', { k: this.id.pub, ts, sig, after, v: 2 }, { timeout: 35000, retries: 0 })
+        ib.fails = 0
         for (const m of r.msgs || []) { after = Math.max(after, m.seq); this.#onWire(m.msg) }
       } catch {
         if (this.abort.signal.aborted) return
-        await sleep(Math.min(30e3, 500 * 2 ** ++fails))
+        ib.fails = (ib.fails || 0) + 1
+        if (ib.fails === 3) this.#rehome()                                    // this inbox is gone: move
+        await sleep(Math.min(30e3, 500 * 2 ** ib.fails))
       }
     }
   }
@@ -254,7 +356,10 @@ export class Peer {
   // The same queries as over UDP and HTTP, as text frames "K" + base64url(bencode), on the `cx` control
   // channel of any connection or on a topic link. So browsers and NATed peers can serve storage too.
   // (Only topic-membership records are ever stored; broadcasts never are.)
-  answer (q, a) { return serve({ id: this.id, store: this.store, stored: raw => this.topics.local(raw).catch(() => {}) }, q, a) }
+  answer (q, a) {
+    if (['get', 'put', 'cx_anchors', 'cx_send'].includes(q)) return this.#mesh(q, a)
+    return serve({ id: this.id, store: this.store, stored: raw => this.topics.local(raw).catch(() => {}) }, q, a)
+  }
   chanRpc (ch, q, a = {}, timeout = 8000) {
     const st = ch.cxRpc ||= new Map(), t = random(4)
     return new Promise((resolve, reject) => {
@@ -305,7 +410,7 @@ export function defaultPlatform () {
   return {
     loadCache: () => { try { return ls?.getItem('corvax.anchors') || '' } catch { return '' } },
     saveCache: t => { try { ls?.setItem('corvax.anchors', t) } catch {} },
-    fetchText: async u => (await fetch(u, { signal: AbortSignal.timeout(8000) })).text(),
+    fetchText: async u => str(await readCapped(await fetch(u, { signal: AbortSignal.timeout(8000) }), 256e3) || new Uint8Array()),   // ≤ 256 KB
     // DNS TXT through public DNS-over-HTTPS (JSON API); works in browsers and every runtime
     dnsTxt: async name => {
       const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`,

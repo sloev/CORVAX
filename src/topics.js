@@ -108,15 +108,19 @@ export class Topics {
         }
       }))
     }
-    await this.copies(items)
+    for (const [x, n] of await this.copies(items)) count.set(x, count.get(x) + n)
     return count
   }
-  // Extra copies: our own store, and every connected neighbour of the topic (over WebRTC).
+  // Extra copies: our own store, and every connected peer (over WebRTC): each is a storage peer too, so
+  // topics work between peers that share no anchor at all. Returns how many peers took each record.
   async copies (items) {
+    const near = this.peer.neighbours(), took = new Map()
     await Promise.allSettled(items.map(async x => {
       await this.peer.store?.put(x.raw)
-      await Promise.allSettled(this.#linksFor(x.topic.hex).map(l => this.peer.chanRpc(l.channel, 'cx_tpub', { r: [x.raw] }, 5000)))
+      const r = await Promise.allSettled(near.map(n => this.peer.chanRpc(n.ch, 'cx_tpub', { r: [x.raw] }, 5000)))
+      took.set(x, r.filter(y => y.status === 'fulfilled' && ['ok', 'dup'].includes(y.value.ok?.[0] && str(y.value.ok[0]))).length)
     }))
+    return took
   }
   // A cx_tpub that outlives a closing page (fetch keepalive); answers are not awaited by the page.
   sendNow (urls, raw) {
@@ -162,8 +166,8 @@ export class Topics {
   async search (topic) {
     const found = []
     for (const raw of this.peer.store?.find([topic.id]) || []) found.push(raw)
-    await Promise.allSettled([...this.#linksFor(topic.hex).map(async l => {        // neighbours answer over WebRTC
-      const r = await this.peer.chanRpc(l.channel, 'cx_tfind', { t: [topic.id] }, 5000)
+    await Promise.allSettled([...this.peer.neighbours().map(async n => {           // connected peers answer over WebRTC
+      const r = await this.peer.chanRpc(n.ch, 'cx_tfind', { t: [topic.id] }, 5000)
       found.push(...(Array.isArray(r.r) ? r.r : []))
     }), ...this.pick(topic.id, this.L.searchClosest, this.L.searchRandom).map(async e => {
       const t0 = this.now()
@@ -419,6 +423,7 @@ export class Topic {
     if (message || !presence) this.topics.ensureBeacon().catch(() => {})    // only broadcast links need us reachable
     this.topics.rewatch()
     this.topics.maintainSoon(this)
+    if (!this.topics.candidates().length) this.topics.search(this).catch(() => {})   // no storage anchor to watch: ask connected peers
     return () => {
       if (!this.subs.delete(s)) return
       if (!this.wantsLinks()) this.topics.dropLinks(this)

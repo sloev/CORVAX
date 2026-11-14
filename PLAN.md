@@ -17,13 +17,14 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 8. **Trystero transport:** Trystero rooms signalled over CORVAX, peer to peer (SPEC §10).
 9. **One codebase, many hosts:** the JS core everywhere; a host supplies sockets (SPEC §11). Apps on this device find the local node.
 10. **Local radios (apps):** BLE and Wi-Fi Direct between nearby devices (SPEC §12).
+11. **Mesh services:** every peer is a small anchor for the peers connected to it: Beacons, anchor lists, message passing, topic storage. Links can be made by hand, with no anchor at all (SPEC §13).
 
 **One kind of peer.** An anchor is a peer that is publicly reachable and expected to stay online. Nothing else distinguishes it.
 
 **Never in scope:**
 - anything on top of a DataChannel
 - rooms, history, durable or acknowledged messaging, group encryption
-- gossip beyond bounded broadcast, introductions, reputation, incentives, telemetry, central services
+- gossip beyond bounded broadcast, multi-hop routing (a message is passed on once), reputation, incentives, telemetry, central services
 - our own WebRTC stack, TURN, WebTransport, UPnP, DNS servers, ICMP; WebSocket except an anchor's `/relay`
 - BEP 5 as a topic index; a second implementation of the protocol
 
@@ -47,6 +48,9 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 | Trystero via its public `createTopicStrategy`, our own package | No fork, no relay; members by presence, signals mesh-first |
 | One JS core + hosts, not a native rewrite | One protocol implementation; apps stay small (system webview + a thin native shell) |
 | Apps live in `sloev/corvax-native` | The protocol repo stays small and runtime-free |
+| Peers serve what anchors serve, over WebRTC | A connected network survives losing every anchor; all nodes have the same features |
+| Inbox anchors by XOR distance among the good ones; dead inboxes replaced | Load spreads over all anchors instead of the top two; peers stay reachable |
+| Inbox polls and relay hellos name the anchor (v 2) | A poll or hello can't be replayed elsewhere, an ack can't be forged |
 
 ## One-shot plan v1.1
 
@@ -64,7 +68,8 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 
 ## Status
 
-- [x] **Node:** 52 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app, Trystero)
+- [x] **Node:** 57 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app, Trystero, mesh)
+- [x] **No anchors at all** (`test/mesh.test.js`): peers linked by hand exchange messages, Beacons and topic records; two peers that share only a mutual peer find each other by topic, connect through it and stay connected when it leaves; also between two Chromium tabs with the only anchor shut down
 - [x] **Bun 1.4 and Deno 2.9:** smoke test (anchors, messages, direct and relayed channels, topics)
 - [x] **Live:** our Beacon round-trips through `relay.pkarr.org`; DNS TXT via DoH
 - [x] **Homepage app:** DOX (overview + JS API reference) / APP / STATS; DOX first, then the last view remembered. APP: identity, peers with honest presence, messages and live chat, topics, follows, live-only updates, optional local node. Driven end to end in Chromium (`test/app.test.js`); no sideways scroll at 320–420 px
