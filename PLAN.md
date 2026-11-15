@@ -27,7 +27,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 - rooms, history, group encryption; durable messaging beyond kept messages (≤ 7 days, ≤ 4 KB, best effort)
 - gossip beyond bounded broadcast, routing beyond 4 hops or with idle announcements, reputation, incentives, telemetry, central services
 - our own WebRTC stack, TURN, WebTransport, UPnP, DNS servers, ICMP; WebSocket except an anchor's `/relay`
-- BEP 5 as a topic index; a second implementation of the protocol
+- BEP 5 as a topic index; a second full implementation (the Rust port in corvax-native is a conformance-tested subset for devices that can't run JS)
 
 ## Decisions
 
