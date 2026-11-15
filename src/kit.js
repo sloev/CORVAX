@@ -16,9 +16,12 @@ async function tabPeer (slot, options) {
 }
 
 // Live presence: onCount(n, info) runs whenever the number of peers here changes (you included).
-// Presence only: a short lease, no inbox, no Beacon, no WebRTC between peers. Hidden or closed tabs leave at once.
-export async function presence (onCount = () => {}, { topic = here(), lease = 120e3, peer, ...options } = {}) {
-  const p = peer || await tabPeer('corvax.presence', { listen: false, storage: false, relayFor: false, ...options })
+// Hidden or closed tabs leave at once. help (default true): the page also strengthens the network while it is open:
+// it keeps a few links to other peers, stores topic records, passes messages on and carries kept ones. That takes
+// an inbox and WebRTC links (linked peers see each other's IP). help: false = presence only, no links at all.
+export async function presence (onCount = () => {}, { topic = here(), lease = 120e3, help = true, peer, ...options } = {}) {
+  const p = peer || await tabPeer('corvax.presence', help ? options : { listen: false, storage: false, relayFor: false, ...options })
+  if (!peer && help) p.publish().catch(() => {})                          // reachable, so others can link to it
   const t = await p.topic(topic), others = new Set()
   const info = {
     topic, peer: p,
@@ -26,7 +29,11 @@ export async function presence (onCount = () => {}, { topic = here(), lease = 12
     get peers () { return [...others] },
     async leave () { off(); doc?.removeEventListener('visibilitychange', visible); await t.close(); if (!peer) await p.close() }
   }
-  const off = t.subscribe({ presence: e => { e.presence === 'recent' ? others.add(e.address) : others.delete(e.address); onCount(info.count, info) } })
+  const off = t.subscribe({ presence: e => {
+    e.presence === 'recent' ? others.add(e.address) : others.delete(e.address)
+    if (help && e.presence === 'recent') p.meet(e.address)               // other visitors are who we link with
+    onCount(info.count, info)
+  } })
   const join = () => t.publish({ beacon: false, lease })
   const visible = () => doc.hidden ? t.unpublish() : join().catch(() => {})
   doc?.addEventListener('visibilitychange', visible)

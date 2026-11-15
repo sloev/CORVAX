@@ -226,7 +226,9 @@ What an anchor does over HTTP, every peer also does for the peers connected to i
 | `get {k}` / `put {k, seq, sig, v}` | Beacons it holds (≤ 512, newest `seq` wins, verified). On every new connection both sides `put` their own Beacon |
 | `cx_anchors {have?}` | its shared anchor list; both sides ask on connect, so anchor lists spread peer to peer |
 | `cx_peers {}` | `{p: [ed_pub ‖ Beacon wire] ≤ 8}`: the Beacons of the peers connected to it (peer exchange) |
-| `cx_send {to, msg}` | `to` is itself: delivered. `to` is connected to it: passed on once (≤ 100 per 10 s; never if `relayFor` is off). Otherwise error 204 |
+| `cx_send {to, msg, h?}` | `to` is itself: delivered. `to` is connected to it: passed on. Otherwise, if `h` > 1 and it knows a next hop: passed on with `h − 1` (`h` ≤ 4; without `h`: one hop). ≤ 100 passed on per 10 s; never if `relayFor` is off. Else error 204 |
+| `cx_path {to, ttl ≤ 4, n: 8 B}` | `{h}`: its distance to `to` in hops. 1 if connected; else it asks ≤ 4 of its peers with `ttl − 1` and answers their best + 1, remembering that peer as its next hop for 5 min. Each `n` is answered once (no loops) |
+| `cx_carry {p: [{to, exp, h, msg}] ≤ 16}` | `{ok}`: parcels to deliver, pass on or keep (§14) |
 | `cx_tpub`, `cx_tfind` | topic storage (§6); publishers store on every connected peer too, and searches ask them |
 
 **Clients:**
@@ -234,7 +236,7 @@ What an anchor does over HTTP, every peer also does for the peers connected to i
 - **Sending a message** (§2):
   1. over an open connection to the recipient
   2. else to an inbox anchor from its Beacon
-  3. else through any connected peer that is connected to the recipient
+  3. else along a path of connected peers: `cx_path` finds the next hop, `cx_send` with `h: 4` follows it (routing on demand; nothing is announced or flooded while idle)
 - **`publish`** succeeds when an anchor or a connected peer takes the Beacon.
 
 **`have`** (every `cx_anchors`, also over HTTP and UDP): a Bloom filter of the anchor keys the asker knows (256 B, 3 probes: bytes 0–1, 2–3, 4–5 of the key, each mod 2048; its best 200 entries). The reply leaves out lines whose key is in it, so a sync costs only what is new.
@@ -257,3 +259,13 @@ code = "cx1" ‖ b64(bencode { k: ed_pub, sid, sdp, to, sig })     sig = Ed25519
 The invitation has an offer SDP with all ICE candidates and empty `to`; the reply has the answer SDP, the same `sid`, and `to` = the inviter's key. About 1,000 characters each.
 
 **Any medium:** a Beacon as text is `"cxb" ‖ b64(ed_pub ‖ Beacon wire)`; a sealed message (§2) as text is `"cxm" ‖ b64(wire)`.
+
+## 14. Store, carry, forward
+
+A **kept message** is a message (§2) whose inner part also has `exp` (absolute ms, ≤ 7 days after `ts`): it is valid until `exp` instead of for 10 minutes. ≤ 4096 B sealed. As a **parcel** `{to, exp, h, msg}` it waits on the sender's device and travels with peers until it arrives:
+
+- **Parcel id:** first 16 bytes of SHA-256(`msg`), hex. Carriers see `to` and `exp`; everything else is sealed.
+- **Delivery:** to the recipient over an open connection (then the copy is dropped), else to its inbox anchors, retried after 30 s, 1 min, 2 min … up to hourly, since it may be offline.
+- **Carrying:** on meeting a peer (every new connection, and each minute), a peer delivers the parcels addressed to it and hands over copies of ≤ 8 others with `cx_carry`. Each parcel goes to ≤ 3 peers per carrier and ≤ 4 hops (`h`).
+- **Limits:** a carrier keeps ≤ 64 parcels (browsers) or 1024, ≤ 8 per recipient; when full, the soonest-expiring parcel of others makes room. `carry: false` carries for nobody. Parcels are saved like the rest of a peer's memory.
+- **Receipt:** the recipient answers a kept message with the message `{cx:"got", id}` to its sender, which then drops its copy. It ignores copies it has already seen until `exp`.

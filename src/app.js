@@ -384,7 +384,7 @@ const EXAMPLE = `<p><b id="count">…</b> people here now</p>
 
 // [signatures (one per line), what it does, example]. The whole public JS API, helpers first; SPEC.md has the wire protocol.
 const API = [
-  [['presence(onCount, { topic, lease }?)', '  → Promise<{ count, peers, leave() }>'], 'A live count of the peers on a topic (default: this page), you included. onCount runs on every change, within about 2 s. Presence only: a 2-minute lease, a per-tab key (a reload is the same visitor), no inbox and no WebRTC between peers. Hidden or closed tabs leave at once. Other options go to Peer.create.',
+  [['presence(onCount, { topic, lease, help }?)', '  → Promise<{ count, peers, leave() }>'], 'A live count of the peers on a topic (default: this page), you included. onCount runs on every change, within about 2 s. A per-tab key (a reload is the same visitor), a 2-minute lease, and hidden or closed tabs leave at once. While open, the page also helps the network: it links with a few other peers, stores records and passes messages on (linked peers see each other’s IP). help: false turns that off: presence only, no connections. Other options go to Peer.create.',
 `const here = await presence(n => {
   count.textContent = n
 })
@@ -427,11 +427,14 @@ const again = await Peer.create({ seed })`],
   [['me.resolve(address, { fresh }?)', '  → Promise<{ address, seq, c, fields } | null>'], 'Looks up a peer’s record (cached for 30 s). c lists its inbox anchors; fields.n is its name.',
 `const record = await me.resolve(address)
 console.log(record?.fields.n?.[0] ?? 'unnamed')`],
-  [['me.send(address, body) → Promise', 'me.on(fn) → off()'], 'Sends a small JSON message (≤ 16 KB sealed) through the recipient’s inbox anchors: end-to-end encrypted, signed, best effort, kept for at most 2 minutes.',
+  [['me.send(address, body, { keep }?) → Promise', 'me.on(fn) → off()'], 'Sends a small JSON message (≤ 16 KB sealed): end-to-end encrypted and signed. It goes over an open connection, else through the recipient’s inbox anchors, else across up to 4 connected peers. Best effort; with keep (ms, ≤ 7 days, ≤ 4 KB) it waits on your device and travels with the peers you meet until it arrives.',
 `const off = me.on(({ from, body }) => {
   console.log(from, body)
 })
-await me.send(address, { hello: 'there' })`],
+await me.send(address, { hello: 'there' })
+
+// they are offline: keep it for a day
+await me.send(address, 'see you friday', { keep: 86400e3 })`],
   [['me.accept(fn) → off()', 'me.connect(address, { timeout, relay }?)', '  → Promise<{ channel, kind, via? }>'], 'Opens a WebRTC DataChannel: direct when possible, otherwise relayed by another peer (kind "peer", still end-to-end encrypted). The other side must call accept. A direct connection reveals your IP address to that peer.',
 `// on the receiving side
 me.accept(({ from, channel }) => {

@@ -160,3 +160,58 @@ test('anchor lists sync by filter: only unknown lines are sent', async () => {
   assert.ok(news.length >= 9 && news.length <= 10 && news.every(l => lines.indexOf(l) >= 30), `${news.length} of 40 lines sent`)
   assert.equal(without('x', 'not a filter'), 'x')
 })
+
+test('store, carry, forward: a kept message travels with a peer to a recipient the sender never meets', async t => {
+  const [a, b, c] = [await alone(), await alone(), await alone()]
+  t.after(async () => { await b.close(); await c.close() })
+  await a.learn(await b.card())                                                 // A knows B's key (a card), nothing else
+  await link(a, c)
+  assert.equal(await a.send(b.address, { note: 'see you friday' }, { keep: 86400e3 }), 'kept')
+  await until(() => c.carry.size === 1, 5000)                                   // C now carries it (sealed: C can't read it)
+  await a.close()                                                               // the sender is gone
+  const got = new Promise(resolve => b.on(m => resolve([m.from, m.body])))
+  await link(c, b)                                                              // later, C meets B
+  assert.deepEqual(await got, [a.address, { note: 'see you friday' }])
+  await until(() => c.carry.size === 0, 5000)                                   // delivered: C drops its copy
+})
+
+test('outbox: a kept message survives a restart and is delivered when a path appears; the sender hears back', async t => {
+  const disk = {}, platform = { loadCache: () => '', saveCache () {}, loadPeers: () => disk.peers || '', savePeers: x => { disk.peers = x }, loadCarry: () => disk.carry || '', saveCarry: x => { disk.carry = x } }
+  const o = { fallback: [], local: false, platform }
+  let a = await Peer.create(o)
+  const b = await alone(), seed = a.seed
+  t.after(async () => { await a.close(); await b.close() })
+  await a.learn(await b.card())
+  assert.equal(await a.send(b.address, 'later', { keep: 3600e3 }), 'kept')
+  await a.close()
+  assert.ok(disk.carry.length > 100, 'the parcel is on disk')
+  a = await Peer.create({ ...o, seed })
+  assert.equal(a.carry.size, 1)
+  const got = new Promise(resolve => b.on(m => resolve(m.body)))
+  await link(a, b)
+  assert.equal(await got, 'later')
+  await until(() => a.carry.size === 0, 5000)
+  await assert.rejects(a.send(b.address, Array.from(crypto.getRandomValues(new Uint8Array(5000)), x => x.toString(16)).join(''), { keep: 1e3 }), e => e.code === 'too-large')
+})
+
+test('routing: a message crosses a chain of four peers hop by hop; then they connect directly through it', async t => {
+  const quiet = () => Peer.create({ fallback: [], local: false, mesh: 0, platform: { loadCache: () => '', saveCache () {} } })   // no backbone: the chain stays a chain
+  const [a, b, c, d] = [await quiet(), await quiet(), await quiet(), await quiet()]
+  t.after(async () => { for (const p of [a, b, c, d]) await p.close() })
+  await link(a, b); await link(b, c); await link(c, d)
+  await a.learn(await d.card()); await d.learn(await a.card())                  // they know each other's key, and share no peer
+  const got = new Promise(resolve => d.on(m => resolve([m.from, m.body])))
+  await a.send(d.address, 'three hops')
+  assert.deepEqual(await got, [a.address, 'three hops'])
+  assert.deepEqual([a.routes.get(d.address).h, b.routes.get(d.address).h, a.routes.get(d.address).via], [3, 2, b.address])
+  d.accept(({ channel }) => { channel.onmessage = e => channel.send('echo ' + e.data) })
+  const { channel, kind } = await a.connect(d.address)                          // offer, answer and candidates all travel the chain
+  assert.equal(kind, 'direct')
+  const reply = new Promise(resolve => { channel.onmessage = e => resolve(String(e.data)) })
+  channel.send('hi')
+  assert.equal(await reply, 'echo hi')
+  const e = await quiet()
+  t.after(() => e.close())
+  await a.learn(await e.card())
+  await assert.rejects(a.send(e.address, 'nobody knows E'), x => x.code === 'no-anchor')
+})

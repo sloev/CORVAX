@@ -89,6 +89,8 @@ class CorvaxNode {
         saveCache: t => this.#saveCache(t),
         loadPeers: () => this.kv.get('peers.txt'),
         savePeers: t => this.kv.set('peers.txt', t).catch(() => {}),
+        loadCarry: () => this.kv.get('carry.txt'),
+        saveCarry: t => this.kv.set('carry.txt', t).catch(() => {}),
         probe: entries => this.probe(entries),
         dnsTxt: this.io.dnsTxt
       }

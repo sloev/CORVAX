@@ -83,6 +83,8 @@ Every peer does for its connected peers what an anchor does: it keeps their Beac
 
 Peers remember the anchors and peers they meet (browsers in `localStorage`, nodes on disk) and keep 3 links to peers they know (`Peer.create({ mesh: 3 })`, 0 to turn off), finding more through the peers they are connected to. The network grows with use and heals itself.
 
+Messages find their way across up to 4 connected peers, and `me.send(address, body, { keep: 86400e3 })` keeps a message for up to 7 days: it waits on your device and travels with the peers you meet until it arrives.
+
 With no network service at all, link two peers by hand. The codes are about 1,000 characters: paste them, show them as QR, read them out.
 
 ```js

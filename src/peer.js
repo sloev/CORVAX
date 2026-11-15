@@ -2,12 +2,12 @@
 // resolves others, exchanges signed+encrypted messages through anchors' inboxes, and opens
 // DataChannels (direct, or relayed by a third peer). Uses only fetch + WebCrypto + WebRTC,
 // so the same file runs in browsers, Node, Bun and Deno.
-import { identity, supported, sign, sha1, hiOk } from './crypto.js'
-import { seal, open, MAX_AGE, MAX_MESSAGE, CAN_INFLATE } from './message.js'
+import { identity, supported, sign, sha1, sha256, hiOk } from './crypto.js'
+import { seal, open, MAX_AGE, MAX_MESSAGE, CAN_INFLATE, KEEP_MAX, PARCEL_MAX } from './message.js'
 import { makeBeacon, verifyBeacon, fields, pack, unpack } from './record.js'
 import { encode, decode } from './bencode.js'
 import { Book, parseLine, formatLine, without } from './book.js'
-import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, equal, fail, sleep, concat, xor, compare, readCapped, CorvaxError } from './bytes.js'
+import { b64, unb64, hex, unhex, utf8, str, z32, unz32, random, equal, fail, sleep, concat, xor, compare, readCapped, shuffle, CorvaxError } from './bytes.js'
 export { CorvaxError }
 import * as rtc from './rtc.js'
 import * as relay from './relay.js'
@@ -55,6 +55,11 @@ export class Peer {
     p.known = new Map()                      // address -> { t, fails, tried }: peers we met, remembered across restarts
     p.mesh = o.mesh ?? (p.listen && p.relayFor && p.RTC ? 3 : 0)   // backbone: keep this many links to known peers
     p.maxConns = isBrowser ? 12 : 64
+    p.routes = new Map()                     // address -> { via, h, t }: next hop toward peers we are not connected to
+    p.asked = new Map()                      // path query id -> time (each query is answered once)
+    p.carry = new Map()                      // parcel id -> { to, exp, h, msg, mine, given, next, wait }: kept messages on their way
+    p.carryFor = o.carry ?? true             // carry kept messages for others (bounded)
+    p.carryMax = isBrowser ? 64 : 1024
     p.conns = new Map()                      // address -> open direct connection { pc, app, ctl }
     p.wsRelays = new Map()                   // anchor key -> WebSocket relay connection (last resort)
     p.sessions = new Map()                   // sid -> WebRTC negotiation state
@@ -99,6 +104,12 @@ export class Peer {
     }
     this.weaver = setInterval(() => this.weaveSoon(0), 300e3)
     this.weaver.unref?.()
+    for (const line of String(await this.platform.loadCarry?.() || '').split('\n').filter(Boolean).slice(0, this.carryMax)) {
+      const [to, exp, h, mine, msg] = line.split(' ')
+      await this.#keep({ to: unb64(to), exp: +exp, h: +h, msg: unb64(msg) }, mine === '1').catch(() => {})
+    }
+    this.carrier = setInterval(() => this.#carryOn().catch(() => {}), 60e3)
+    this.carrier.unref?.()
     this.weaveSoon()
   }
 
@@ -113,9 +124,63 @@ export class Peer {
     this.platform.saveCache?.(this.book.toText())
     this.platform.savePeers?.([...this.known].sort((x, y) => y[1].t - x[1].t).slice(0, 64)
       .map(([a]) => this.held.get(a)).filter(Boolean).map(r => 'cxb' + b64(concat(r.pub, pack(r)))).join('\n'))
+    this.platform.saveCarry?.([...this.carry.values()].map(p => `${b64(p.to)} ${p.exp} ${p.h} ${p.mine ? 1 : 0} ${b64(p.msg)}`).join('\n'))
+  }
+
+  // ---- store, carry, forward (SPEC §14) -----------------------------------------------------------------
+  // A kept message (a parcel) waits on the sender's device and travels with the peers it meets until it reaches
+  // the recipient or expires. Carriers see only who it is for and when it expires; the rest is sealed.
+  async #keep (p, mine = false) {
+    const id = hex(await sha256(p.msg)).slice(0, 32), now = Date.now()
+    if (this.carry.has(id)) return this.carry.get(id)
+    if (!(p.to?.length === 32) || !(p.exp > now) || p.exp > now + KEEP_MAX || p.msg.length > PARCEL_MAX) throw fail('too-large', 'not a parcel we can keep')
+    if (!mine) {
+      if (!this.carryFor || [...this.carry.values()].filter(x => equal(x.to, p.to)).length >= 8) throw fail('busy', 'no room for this parcel')
+      if (this.carry.size >= this.carryMax) {                       // full: the soonest-expiring parcel of others makes room
+        const old = [...this.carry].filter(([, x]) => !x.mine).sort((x, y) => x[1].exp - y[1].exp)[0]
+        if (!old) throw fail('busy', 'no room for this parcel')
+        this.carry.delete(old[0])
+      }
+    }
+    const kept = { id, to: p.to, exp: p.exp, h: Math.min(p.h ?? 4, 4), msg: p.msg, mine, given: new Set(), next: 0, wait: 30e3 }
+    this.carry.set(id, kept)
+    this.remember()
+    return kept
+  }
+  // Try to hand a parcel over: straight to the recipient if connected (certain), else to its inbox anchors (it may be
+  // offline, so the parcel is kept and retried, less and less often, until the sender hears 'got' or it expires).
+  async #deliver (p) {
+    const address = z32(p.to), direct = this.neighbours(64).find(n => n.address === address)
+    if (direct) try { await this.chanRpc(direct.ch, 'cx_send', { to: p.to, msg: p.msg }, 5000); this.carry.delete(p.id); this.remember(); return true } catch {}
+    p.next = Date.now() + p.wait; p.wait = Math.min(p.wait * 2, 3600e3)
+    const beacon = await this.resolve(address).catch(() => null)
+    const urls = (beacon?.c || []).map(line => { const e = parseLine(line); return e && this.urlOf(e) }).filter(Boolean)
+    if (!urls.length) return false
+    return hedge(urls.map(u => () => this.rpc(u, 'cx_send', { to: p.to, msg: p.msg })), 700).then(() => true, () => false)
+  }
+  // Meeting a peer: deliver what is for it, and give it copies of up to 8 other parcels (each parcel to ≤ 3 peers, ≤ 4 hops).
+  async #meet (ch, address) {
+    for (const p of [...this.carry.values()]) if (z32(p.to) === address) await this.#deliver(p)
+    const give = [...this.carry.values()].filter(p => p.h > 0 && p.given.size < 3 && !p.given.has(address)).slice(0, 8)
+    if (!give.length) return
+    for (const p of give) p.given.add(address)
+    await this.chanRpc(ch, 'cx_carry', { p: give.map(p => ({ to: p.to, exp: p.exp, h: p.h, msg: p.msg })) }, 8000).catch(() => {})
+  }
+  async #carryOn () {
+    const now = Date.now()
+    for (const [id, p] of this.carry) if (p.exp <= now) { this.carry.delete(id); this.remember() }
+    if (!this.carry.size) return
+    for (const p of [...this.carry.values()]) if (p.next <= now) await this.#deliver(p)
+    for (const n of this.neighbours()) await this.#meet(n.ch, n.address)
   }
   // Keep `mesh` links to peers we know, so the network holds together without anchors and heals when links drop
   // (a small active view over a remembered passive view, as in HyParView). New candidates come from peer exchange.
+  // A peer worth linking to (e.g. met on a topic): a candidate for the backbone.
+  meet (address) {
+    if (!this.mesh || address === this.address || this.known.has(address)) return
+    this.known.set(address, { t: Date.now(), fails: 0 })
+    this.weaveSoon()
+  }
   weaveSoon (ms = 2000) {
     if (!this.mesh || this.weaving || this.abort.signal.aborted) return
     this.weaving = setTimeout(() => { this.weaving = null; this.#weave().catch(() => {}) }, ms)
@@ -281,7 +346,13 @@ export class Peer {
     const urls = beacon.c.map(line => { const e = parseLine(line); return e && this.urlOf(e) }).filter(Boolean)
     let last = 'no usable anchor line'
     try { if (urls.length) { await hedge(urls.map(u => () => this.rpc(u, 'cx_send', { to, msg })), 700); return true } } catch (err) { last = err.message }
-    const via = await Promise.allSettled(this.neighbours().filter(n => n !== direct).map(pass))   // 3. a peer we share with them
+    try {                                                                      // 3. along a path of connected peers (≤ 4 hops)
+      await this.#path(to)
+      const hop = this.neighbours(64).find(n => n.address === this.routes.get(address).via)
+      await this.chanRpc(hop.ch, 'cx_send', { to, msg, h: 4 }, 5000)
+      return true
+    } catch {}
+    const via = await Promise.allSettled(this.neighbours().filter(n => n !== direct).map(pass))   // (peers without cx_path)
     if (via.some(r => r.status === 'fulfilled')) return true
     throw fail('no-anchor', `no inbox of ${address} is reachable (${last})`)
   }
@@ -317,6 +388,7 @@ export class Peer {
       this.remember()
     }).catch(() => {})
     if (this.mesh) this.#exchange(ch).then(() => this.weaveSoon(), () => {})
+    this.#meet(ch, address).catch(() => {})
   }
   async #exchange (ch) {
     const r = await this.chanRpc(ch, 'cx_peers', {}, 5000)
@@ -341,14 +413,48 @@ export class Peer {
     }
     if (q === 'cx_anchors') return { a: without(this.anchors(), a.have) }
     if (q === 'cx_peers') return { p: this.neighbours(8).map(n => this.held.get(n.address)).filter(Boolean).map(r => concat(r.pub, pack(r))) }
+    if (q === 'cx_carry') {                                                    // parcels handed to us: deliver, pass on or keep
+      let ok = 0
+      for (const p of (Array.isArray(a.p) ? a.p : []).slice(0, 16)) {
+        if (!key(p?.to) || !(p.msg instanceof Uint8Array) || !Number.isSafeInteger(p.exp)) continue
+        if (equal(p.to, this.id.pub)) { this.#onWire(p.msg); ok++; continue }
+        await this.#keep({ to: p.to, exp: p.exp, h: (Number.isSafeInteger(p.h) ? Math.min(p.h, 4) : 4) - 1, msg: p.msg }).then(k => { ok++; return this.#deliver(k) }, () => {})
+      }
+      return { ok }
+    }
+    if (q === 'cx_path') {
+      if (!key(a.to) || !(a.n instanceof Uint8Array) || a.n.length !== 8 || !this.relayFor || this.asked.has(hex(a.n))) throw [204, 'no path']
+      return { h: await this.#path(a.to, Math.min(a.ttl | 0, 4), a.n) }
+    }
     if (!key(a.to) || !(a.msg instanceof Uint8Array) || a.msg.length > MAX_MESSAGE) throw [203, 'bad message']
     if (equal(a.to, this.id.pub)) { this.#onWire(a.msg); return { queued: 1 } }
-    const next = this.relayFor && this.neighbours(64).find(n => n.address === z32(a.to)), now = Date.now()
+    const address = z32(a.to), now = Date.now(), near = this.neighbours(64), h = Number.isSafeInteger(a.h) ? Math.min(a.h, 4) : 1
+    const route = this.routes.get(address)                                     // not connected to them: the next hop we know
+    const next = this.relayFor && (near.find(n => n.address === address) || (h > 1 && route && now - route.t < 300e3 && near.find(n => n.address === route.via)))
     this.passed = (this.passed || []).filter(t => now - t < 10e3)
-    if (!next || this.passed.length >= 100) throw [204, 'not connected to that peer']      // ≤ 100 passed on per 10 s
+    if (!next || this.passed.length >= 100) throw [204, 'no path to that peer']             // ≤ 100 passed on per 10 s
     this.passed.push(now)
-    this.chanRpc(next.ch, 'cx_send', { to: a.to, msg: a.msg }, 5000).catch(() => {})
+    this.chanRpc(next.ch, 'cx_send', { to: a.to, msg: a.msg, h: h - 1 }, 5000).catch(() => this.routes.delete(address))
     return { queued: 1 }
+  }
+
+  // ---- routing (SPEC §13): paths are found on demand, hop by hop, and remembered for 5 minutes ---------------
+  // Ask up to 4 connected peers "how far is `to` from you?" (they ask theirs, ≤ 4 hops in all); the nearest becomes
+  // our next hop. Every peer on the way learns its own next hop from the same question. Returns our distance in hops.
+  async #path (to, ttl = 4, n = random(8)) {
+    const address = z32(to), now = Date.now(), near = this.neighbours(64), r = this.routes.get(address)
+    if (near.some(x => x.address === address)) return 1
+    if (r && now - r.t < 300e3 && near.some(x => x.address === r.via)) return r.h
+    this.asked.set(hex(n), now)
+    if (this.asked.size > 2000) for (const [k, t] of this.asked) if (now - t > 60e3) this.asked.delete(k)
+    if (ttl <= 1) throw [204, 'no path']
+    const found = (await Promise.allSettled(shuffle(near).slice(0, 4).map(x =>
+      this.chanRpc(x.ch, 'cx_path', { to, ttl: ttl - 1, n }, 1500 * ttl).then(a => ({ via: x.address, h: a.h })))))
+      .filter(a => a.status === 'fulfilled' && Number.isSafeInteger(a.value.h) && a.value.h >= 1).map(a => a.value).sort((x, y) => x.h - y.h)[0]
+    if (!found) throw [204, 'no path']
+    this.routes.delete(address); this.routes.set(address, { via: found.via, h: found.h + 1, t: Date.now() })
+    if (this.routes.size > 1000) this.routes.delete(this.routes.keys().next().value)
+    return found.h + 1
   }
 
   // ---- by hand (SPEC §13): no anchors, no network services ----------------------------------------------
@@ -371,17 +477,31 @@ export class Peer {
     return 'cxm' + b64(await seal(this.id, unz32(address), beacon.x, { app: body }))
   }
   receive (text) { return this.#onWire(unb64(String(text).trim().slice(3))) }
-  send (address, body) { return this.signal(address, { app: body }) }
+  // keep (ms, ≤ 7 days): the message waits here and travels with peers until it arrives. Returns true when it was
+  // handed over at once, 'kept' when it is waiting.
+  async send (address, body, { keep } = {}) {
+    if (!keep) return this.signal(address, { app: body })
+    const beacon = await this.resolve(address)
+    if (!beacon?.x) throw fail('not-found', `no record for ${address}`)
+    const exp = Date.now() + Math.min(keep, KEEP_MAX)
+    const msg = await seal(this.id, unz32(address), beacon.x, { app: body }, beacon.fields.v?.[0] >= 2, exp)
+    if (msg.length > PARCEL_MAX) throw fail('too-large', `a kept message is at most ${PARCEL_MAX} bytes sealed`)
+    const p = await this.#keep({ to: unz32(address), exp, msg }, true)
+    const now = await this.#deliver(p)
+    for (const n of this.neighbours()) this.#meet(n.ch, n.address).catch(() => {})
+    return now || 'kept'
+  }
   on (fn) { this.handlers.add(fn); return () => this.handlers.delete(fn) }
 
   async #onWire (wire) {
     let m
     try { m = await open(this.id, wire) } catch { return }
     if (this.seen.has(m.id)) return
-    const now = Date.now()
-    this.seen.set(m.id, now)
-    if (this.seen.size > 5000) for (const [k, t] of this.seen) if (now - t > MAX_AGE) this.seen.delete(k)
-    const from = z32(m.from), body = m.body
+    const now = Date.now(), from = z32(m.from), body = m.body
+    this.seen.set(m.id, Math.max(now + MAX_AGE, m.exp))                       // remembered for as long as it stays valid
+    if (this.seen.size > 5000) for (const [k, until] of this.seen) if (until < now) this.seen.delete(k)
+    if (m.exp) this.signal(from, { cx: 'got', id: hex(await sha256(wire)).slice(0, 32) }).catch(() => {})   // a kept message: tell the sender
+    if (body?.cx === 'got') { const p = this.carry.get(String(body.id)); if (p?.mine && z32(p.to) === from) { this.carry.delete(p.id); this.remember() } return }
     if (body?.cx) {
       if (body.cx.startsWith('via')) return relay.onSignal(this, from, body).catch(() => {})
       return rtc.onSignal(this, from, body).catch(() => {})
@@ -429,7 +549,7 @@ export class Peer {
   // channel of any connection or on a topic link. So browsers and NATed peers can serve storage too.
   // (Only topic-membership records are ever stored; broadcasts never are.)
   answer (q, a) {
-    if (['get', 'put', 'cx_anchors', 'cx_peers', 'cx_send'].includes(q)) return this.#mesh(q, a)
+    if (['get', 'put', 'cx_anchors', 'cx_peers', 'cx_send', 'cx_carry', 'cx_path'].includes(q)) return this.#mesh(q, a)
     return serve({ id: this.id, store: this.store, stored: raw => this.topics.local(raw).catch(() => {}) }, q, a)
   }
   chanRpc (ch, q, a = {}, timeout = 8000) {
@@ -460,7 +580,7 @@ export class Peer {
 
   async close () {
     await this.topics.close()                // unpublishes (tombstones) before the network goes away
-    clearInterval(this.refresher); clearInterval(this.weaver); clearTimeout(this.weaving); clearTimeout(this.saving)
+    clearInterval(this.refresher); clearInterval(this.weaver); clearInterval(this.carrier); clearTimeout(this.weaving); clearTimeout(this.saving)
     this.#save()
     clearInterval(this.sweeper)
     this.abort.abort()
@@ -485,6 +605,8 @@ export function defaultPlatform () {
     saveCache: t => { try { ls?.setItem('corvax.anchors', t) } catch {} },
     loadPeers: () => { try { return ls?.getItem('corvax.peers') || '' } catch { return '' } },
     savePeers: t => { try { ls?.setItem('corvax.peers', t) } catch {} },
+    loadCarry: () => { try { return ls?.getItem('corvax.carry') || '' } catch { return '' } },
+    saveCarry: t => { try { ls?.setItem('corvax.carry', t) } catch {} },
     fetchText: async u => str(await readCapped(await fetch(u, { signal: AbortSignal.timeout(8000) }), 256e3) || new Uint8Array()),   // ≤ 256 KB
     // DNS TXT through public DNS-over-HTTPS (JSON API); works in browsers and every runtime
     dnsTxt: async name => {

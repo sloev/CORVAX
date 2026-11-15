@@ -17,14 +17,15 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 8. **Trystero transport:** Trystero rooms signalled over CORVAX, peer to peer (SPEC §10).
 9. **One codebase, many hosts:** the JS core everywhere; a host supplies sockets (SPEC §11). Apps on this device find the local node.
 10. **Local radios (apps):** BLE and Wi-Fi Direct between nearby devices (SPEC §12).
+12. **Routing and store-carry-forward:** messages cross ≤ 4 hops of connected peers on demand; kept messages wait and travel with peers until they arrive (SPEC §13–14).
 11. **Mesh services:** every peer is a small anchor for the peers connected to it: Beacons, anchor lists, message passing, topic storage. Links can be made by hand, with no anchor at all (SPEC §13).
 
 **One kind of peer.** An anchor is a peer that is publicly reachable and expected to stay online. Nothing else distinguishes it.
 
 **Never in scope:**
 - anything on top of a DataChannel
-- rooms, history, durable or acknowledged messaging, group encryption
-- gossip beyond bounded broadcast, multi-hop routing (a message is passed on once), reputation, incentives, telemetry, central services
+- rooms, history, group encryption; durable messaging beyond kept messages (≤ 7 days, ≤ 4 KB, best effort)
+- gossip beyond bounded broadcast, routing beyond 4 hops or with idle announcements, reputation, incentives, telemetry, central services
 - our own WebRTC stack, TURN, WebTransport, UPnP, DNS servers, ICMP; WebSocket except an anchor's `/relay`
 - BEP 5 as a topic index; a second implementation of the protocol
 
@@ -53,6 +54,9 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 | Light on anchors: 50 s polls, deflated message bodies, candidates in the SDP or batched, Beacons cached 10 min, refresh every 30 min | One connection costs 2 messages (~1.6 KB) instead of 4+ (~3 KB); idle traffic halves. Negotiated by `v=2` in the Beacon, so older peers keep working |
 | Peers remember anchors and peers across restarts; a backbone of 3 links with peer exchange (HyParView-style active/passive views) | The network grows with use, holds together without anchors, and heals by itself |
 | Anchor lists sync through a Bloom filter of known keys; sends are hedged | A sync costs only what is new; one slow inbox doesn't delay a message |
+| Routing on demand (`cx_path`), not by announcements | Reticulum-style next-hop tables without idle traffic: a path costs a few small queries when needed, nothing otherwise |
+| Kept messages: sender-chosen expiry inside the seal; spray to ≤ 3 peers, ≤ 4 hops | Delivery without both ends online or any server; carriers learn only recipient and expiry; bounded load |
+| `presence()` helps the mesh by default (`help: false` opts out) | Every open page strengthens the network |
 | Inbox polls and relay hellos name the anchor (v 2) | A poll or hello can't be replayed elsewhere, an ack can't be forged |
 
 ## One-shot plan v1.1
@@ -71,7 +75,7 @@ The protocol is in [SPEC.md](SPEC.md) and usage in [README.md](README.md). This 
 
 ## Status
 
-- [x] **Node:** 61 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app, Trystero, mesh)
+- [x] **Node:** 64 tests (unit, integration, adversarial, WebRTC with `werift` and `node-datachannel`, Chromium, the homepage app, Trystero, mesh)
 - [x] **No anchors at all** (`test/mesh.test.js`): peers linked by hand exchange messages, Beacons and topic records; two peers that share only a mutual peer find each other by topic, connect through it and stay connected when it leaves; also between two Chromium tabs with the only anchor shut down
 - [x] **Bun 1.4 and Deno 2.9:** smoke test (anchors, messages, direct and relayed channels, topics)
 - [x] **Live:** our Beacon round-trips through `relay.pkarr.org`; DNS TXT via DoH

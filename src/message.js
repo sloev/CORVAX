@@ -9,6 +9,7 @@ import { utf8, str, equal, hex } from './bytes.js'
 
 export const MAX_MESSAGE = 16384                     // sealed bytes; fits a full WebRTC offer (Trystero, SDP)
 export const MAX_AGE = 600e3
+export const KEEP_MAX = 7 * 86400e3, PARCEL_MAX = 4096   // kept messages: ≤ 7 days, ≤ 4 KB sealed
 export const CAN_INFLATE = typeof DecompressionStream === 'function' && typeof CompressionStream === 'function'
 const pipe = async (bytes, stream, max = Infinity) => {
   const w = stream.writable.getWriter(), parts = []
@@ -25,10 +26,11 @@ const pipe = async (bytes, stream, max = Infinity) => {
 
 const key = async (shared, ephX, toX) => aesKey(await hkdf(shared, concat(utf8('cx/msg'), ephX, toX)))
 
-export async function seal (me, to, toX, body, compress = false) {
+// exp (absolute ms): a kept message, valid until then instead of for 10 minutes (store-carry-forward, SPEC §14)
+export async function seal (me, to, toX, body, compress = false, exp) {
   const eph = await ephemeral(), json = utf8(JSON.stringify(body))
   const z = compress && CAN_INFLATE && json.length > 200 ? await pipe(json, new CompressionStream('deflate-raw')) : null
-  const inner = encode({ from: me.pub, to, id: random(16), ts: Date.now(), ...(z && z.length < json.length ? { z } : { body: json }) })
+  const inner = encode({ from: me.pub, to, id: random(16), ts: Date.now(), ...(exp && { exp }), ...(z && z.length < json.length ? { z } : { body: json }) })
   const iv = random(12)
   const out = concat(eph.pub, iv, await encrypt(await key(await ecdh(eph.priv, toX), eph.pub, toX), iv, concat(inner, await sign(me, inner))))
   if (out.length > MAX_MESSAGE) throw new Error('message too large')
@@ -44,9 +46,10 @@ export async function open (me, wire) {
   const m = decode(inner)
   if (m.from?.length !== 32 || !m.to || !equal(m.to, me.pub)) throw new Error('not for me')
   if (!await verify(m.from, pt.subarray(pt.length - 64), inner)) throw new Error('bad signature')
-  if (typeof m.ts !== 'number' || Math.abs(Date.now() - m.ts) > MAX_AGE) throw new Error('stale')
+  const now = Date.now(), kept = Number.isSafeInteger(m.exp)
+  if (typeof m.ts !== 'number' || m.ts - now > MAX_AGE || (kept ? now > m.exp || m.exp - m.ts > KEEP_MAX : now - m.ts > MAX_AGE)) throw new Error('stale')
   const json = m.z ? await pipe(m.z, new DecompressionStream('deflate-raw'), 4 * MAX_MESSAGE) : m.body      // inflates to ≤ 64 KB
-  return { from: m.from, id: hex(m.id), ts: m.ts, body: JSON.parse(str(json)) }
+  return { from: m.from, id: hex(m.id), ts: m.ts, exp: kept ? m.exp : 0, body: JSON.parse(str(json)) }
 }
 
 export { identity }
